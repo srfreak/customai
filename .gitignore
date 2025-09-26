@@ -33,3 +33,6 @@ htmlcov/
 # Docker artifacts
 *.pid
 
+
+scriza_bot
+scriza_bot.pub
