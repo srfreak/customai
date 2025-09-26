@@ -2,10 +2,23 @@ version: "3.8"
 
 services:
   scriza-api:
-    image: ghcr.io/srfreak/customAI:${IMAGE_TAG:-latest}
-    build: null
-    environment: production
+    image: ghcr.io/srfreak/customai:${IMAGE_TAG:-latest}
+    restart: always
     env_file:
       - /srv/customai/.env
-    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
     command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  mongodb:
+    image: mongo:4.4
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+volumes:
+  mongodb_data:
