@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  api:
+    image: ghcr.io/srfreak/customAI:${IMAGE_TAG:-latest}
+    env_file:
+      - /srv/customai/.env       # lives on the server, never committed
+    restart: always
+    ports:
+      - "8000:8000"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
