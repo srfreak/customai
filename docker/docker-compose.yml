@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  scriza-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - DATABASE_NAME=scriza_db
+      - SECRET_KEY=your-secret-key-here
+    depends_on:
+      - mongodb
+    networks:
+      - scriza-network
+
+  mongodb:
+    image: mongo:4.4
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - scriza-network
+
+volumes:
+  mongodb_data:
+
+networks:
+  scriza-network:
+    driver: bridge
