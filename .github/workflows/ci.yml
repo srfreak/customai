@@ -72,14 +72,9 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
           set -x
-          ssh -vvv "${DEPLOY_USER}@${DEPLOY_HOST}" <<EOF
-            set -x
-            docker login ghcr.io -u "${GITHUB_ACTOR}" -p "${GITHUB_TOKEN}"
-            docker pull ${IMAGE_NAME}:${IMAGE_TAG}
-            cd /srv/customai
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-              up -d --force-recreate \
-              --renew-anon-volumes \
-              --build \
-              --pull always
-EOF
+          ssh -vvv "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "docker login ghcr.io -u \"${GITHUB_ACTOR}\" -p \"${GITHUB_TOKEN}\" && \
+             docker pull ${IMAGE_NAME}:${IMAGE_TAG} && \
+             cd /srv/customai && \
+             docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+               up -d --force-recreate --renew-anon-volumes --build --pull always"
