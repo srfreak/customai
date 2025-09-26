@@ -11,7 +11,7 @@ from apps.users.models import UserRole
 from passlib.context import CryptContext
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
 
 def get_password_hash(password):
     return pwd_context.hash(password)

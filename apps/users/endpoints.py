@@ -12,8 +12,8 @@ from passlib.context import CryptContext
 
 router = APIRouter()
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing (bcrypt_sha256 avoids raw bcrypt 72-byte limit)
+pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
 
 class Token(BaseModel):
     access_token: str
