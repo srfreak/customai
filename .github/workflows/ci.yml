@@ -23,8 +23,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pytest    # swap for flake8/black/etc if needed
-
+          
   build:
     name: Build & Push Image
     runs-on: ubuntu-latest
