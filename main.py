@@ -14,6 +14,7 @@ from apps.agents.sales.agent import router as sales_agent_router
 from apps.users.endpoints import router as user_router
 from apps.admin_panel.user_management import router as admin_user_router
 from apps.memory.memory_manager import router as memory_router
+from apps.integrations.telephony.twilio import router as twilio_router
 
 app = FastAPI(
     title="Scriza AI Platform",
@@ -84,6 +85,12 @@ app.include_router(
     prefix="/api/v1/memory",
     tags=["memory"],
     dependencies=[Depends(RoleChecker(["user", "admin"]))]
+)
+
+app.include_router(
+    twilio_router,
+    prefix="/api/v1/integrations/telephony/twilio",
+    tags=["telephony"]
 )
 
 @app.get("/health", status_code=status.HTTP_200_OK)

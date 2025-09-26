@@ -42,6 +42,7 @@ class Settings:
     )
     TWILIO_PUBLIC_BASE_URL: str = os.getenv("TWILIO_PUBLIC_BASE_URL", "")
     AUDIO_UPLOAD_URL: str = os.getenv("AUDIO_UPLOAD_URL", "")
+    TWILIO_STREAM_URL: str = os.getenv("TWILIO_STREAM_URL", "")
 
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
