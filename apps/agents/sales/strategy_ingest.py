@@ -11,6 +11,14 @@ from datetime import datetime
 
 router = APIRouter()
 
+class PersonaConfig(BaseModel):
+    name: Optional[str] = None
+    tone: Optional[str] = "friendly, empathetic, persuasive"
+    description: Optional[str] = None
+    voice_id: Optional[str] = None
+    locale: Optional[str] = "en-IN"
+
+
 class StrategyPayload(BaseModel):
     """Strategy payload model"""
     title: str
@@ -19,6 +27,8 @@ class StrategyPayload(BaseModel):
     products: list = []
     objections: Dict[str, str] = {}
     closing_techniques: list = []
+    persona: PersonaConfig = PersonaConfig()
+    fallback_scenarios: Dict[str, str] = {}
 
 @router.post("/ingest_strategy")
 async def ingest_strategy(

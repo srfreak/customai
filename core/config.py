@@ -50,7 +50,7 @@ class Settings:
 
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
 
     # Logging settings
     CALL_LOG_DIR: str = os.getenv("CALL_LOG_DIR", "logs/calls")

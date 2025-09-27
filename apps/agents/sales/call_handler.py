@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from apps.agents.sales import services
+from apps.agents.sales.agent import SalesAgent, STAGE_SEQUENCE
 from core.auth import RoleChecker
 from core.config import settings
 from core.database import get_collection
@@ -96,13 +97,33 @@ async def start_call(
             detail="No strategy found for user. Upload a strategy first.",
         )
 
-    voice_id = request.voice_id or settings.ELEVENLABS_DEFAULT_VOICE_ID or None
-    greeting = strategy.get("payload", {}).get("greeting") or "Hello, this is Scriza AI calling."
+    strategy_payload = strategy.get("payload", {})
+    persona_payload = strategy_payload.get("persona") or {}
+    agent_identifier = (
+        request.agent_id
+        or strategy.get("agent_id")
+        or strategy_payload.get("agent_id")
+        or "sales-agent"
+    )
+    agent_name = persona_payload.get("name") or strategy_payload.get("title") or "Scriza Sales Partner"
+    sales_agent = SalesAgent(
+        agent_id=agent_identifier,
+        user_id=user["user_id"],
+        name=agent_name,
+        persona=persona_payload,
+    )
+    sales_agent.attach_strategy(strategy_payload)
+    goals = strategy_payload.get("goals")
+    if isinstance(goals, list):
+        sales_agent.set_goals(goals)
+    voice_id = request.voice_id or sales_agent.voice_id or settings.ELEVENLABS_DEFAULT_VOICE_ID or None
+    greeting = strategy_payload.get("greeting") or "Hello, this is Scriza AI calling."
 
     twilio_call_sid = None
     call_status = CALL_STATUS_IN_PROGRESS
 
     failure_reason: Optional[str] = None
+    call_reference = sales_agent.conversation_id
 
     try:
         client = services.get_twilio_client()
@@ -123,6 +144,9 @@ async def start_call(
             call_status,
             request.lead_phone,
         )
+        if twilio_call_sid:
+            sales_agent.conversation_id = twilio_call_sid
+            call_reference = twilio_call_sid
     except TelephonyException as exc:
         call_status = CALL_STATUS_FAILED
         failure_reason = str(exc)
@@ -139,38 +163,40 @@ async def start_call(
     voice_failures: List[str] = []
     audio_urls: List[str] = []
     if call_status != CALL_STATUS_FAILED:
-        current_stage = "greeting"
-        lead_input = request.lead_name and f"Lead {request.lead_name} answers the call." or ""
-        strategy_context = await services.generate_strategy_context(strategy.get("payload", {}))
+        strategy_context = await services.generate_strategy_context(strategy_payload)
+        generated_lead_prompts = {
+            "greeting": request.lead_name and f"Hi, this is {request.lead_name}." or "Hello!",
+            "pitch": "Can you tell me more?",
+            "faqs": "I have a quick question.",
+            "objections": "I'm not sure this fits my budget.",
+            "closing": "What happens next?",
+        }
 
-        # Simulate a short conversational flow of up to 4 turns
-        for _ in range(4):
-            reply_response = await services.call_openai_chat(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a friendly sales representative. Follow the provided strategy carefully.\n"
-                            f"{strategy_context}"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Stage: {current_stage}. Lead prompt: {lead_input or 'Start the conversation.'}",
-                    },
-                ]
-            )
+        for current_stage in STAGE_SEQUENCE:
+            lead_input = generated_lead_prompts.get(current_stage, "")
+            if current_stage == "greeting" and not lead_input:
+                lead_input = "Lead answers the call."
 
             try:
-                voice_payload = await services.synthesise_elevenlabs_voice(
-                    text=reply_response,
-                    voice_id=voice_id,
+                response_payload = await sales_agent.generate_sales_response(
+                    user_input=lead_input or "Start the conversation",
+                    stage=current_stage,
+                    lead_name=request.lead_name,
                 )
+            except HTTPException as chat_exc:
+                failure_reason = chat_exc.detail if isinstance(chat_exc.detail, str) else str(chat_exc.detail)
+                logger.error("Failed to generate agent response: %s", failure_reason)
+                call_status = CALL_STATUS_FAILED
+                break
+
+            agent_reply = response_payload["text"]
+
+            try:
+                voice_payload = await sales_agent.speak_response(agent_reply, voice_id=voice_id)
             except HTTPException as synth_exc:
-                voice_failures.append(
-                    synth_exc.detail if isinstance(synth_exc.detail, str) else str(synth_exc.detail)
-                )
-                logger.error("Voice synthesis failed: %s", voice_failures[-1])
+                detail = synth_exc.detail if isinstance(synth_exc.detail, str) else str(synth_exc.detail)
+                voice_failures.append(detail)
+                logger.error("Voice synthesis failed: %s", detail)
                 voice_payload = {"audio_base64": None, "duration": None}
             else:
                 audio_b64 = voice_payload.get("audio_base64")
@@ -206,26 +232,19 @@ async def start_call(
                     message = "Audio upload endpoint not configured"
                     voice_failures.append(message)
                     logger.warning(message)
+
             conversation.append(
                 ConversationTurn(
                     stage=current_stage,
                     lead_input=lead_input or "",
-                    agent_reply=reply_response,
-                    audio_base64=voice_payload["audio_base64"],
-                    duration=voice_payload["duration"],
+                    agent_reply=agent_reply,
+                    audio_base64=voice_payload.get("audio_base64"),
+                    duration=voice_payload.get("duration"),
                 )
             )
+
             if current_stage == "closing":
                 break
-            if current_stage == "greeting":
-                current_stage = "pitch"
-            elif current_stage == "pitch":
-                current_stage = "faqs"
-            elif current_stage == "faqs":
-                current_stage = "objections"
-            else:
-                current_stage = "closing"
-            lead_input = "Acknowledged."
 
     key_phrases = _extract_key_phrases(conversation)
     status_label = CALL_STATUS_COMPLETED if call_status != CALL_STATUS_FAILED else CALL_STATUS_FAILED
@@ -236,10 +255,10 @@ async def start_call(
         failure_reason = "; ".join(voice_failures)
     call_id = await services.save_call_record(
         user_id=user["user_id"],
-        agent_id=request.agent_id or "default-agent",
+        agent_id=agent_identifier,
         lead_name=request.lead_name,
         lead_phone=request.lead_phone,
-        call_sid=twilio_call_sid,
+        call_sid=call_reference,
         status_label=status_label,
         lead_status=lead_status,
         conversation=[turn.dict() for turn in conversation],
@@ -251,7 +270,7 @@ async def start_call(
     excel_path = log_call_summary(
         directory=settings.CALL_LOG_DIR,
         user_id=user["user_id"],
-        agent_id=request.agent_id or "default-agent",
+        agent_id=agent_identifier,
         lead_name=request.lead_name,
         lead_phone=request.lead_phone,
         call_status=status_label,
@@ -272,7 +291,7 @@ async def start_call(
 
     await _persist_memory(
         user_id=user["user_id"],
-        agent_id=request.agent_id or "default-agent",
+        agent_id=agent_identifier,
         call_id=call_id,
         conversation=conversation,
     )
@@ -290,6 +309,8 @@ async def start_call(
             "call_status": call_status,
             "failure_reason": failure_reason,
             "voice_failures": voice_failures,
+            "strategy_context": strategy_context,
+            "conversation_id": sales_agent.conversation_id,
         },
         audio_urls=audio_urls,
     )

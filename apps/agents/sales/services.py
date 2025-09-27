@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
+import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 import httpx
 from fastapi import HTTPException, status
@@ -38,8 +40,20 @@ async def fetch_latest_strategy(user_id: str) -> Optional[Dict[str, Any]]:
     return strategies[0] if strategies else None
 
 
-async def call_openai_chat(messages: List[Dict[str, str]], model: Optional[str] = None) -> str:
-    """Invoke OpenAI chat completion API and return the assistant message."""
+TokenCallback = Optional[Callable[[str], Awaitable[None]]]
+
+
+async def call_openai_chat(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    *,
+    stream: bool = False,
+    persona: Optional[Dict[str, Any]] = None,
+    goals: Optional[Sequence[str]] = None,
+    temperature: float = 0.7,
+    on_token: TokenCallback = None,
+) -> str:
+    """Invoke GPT-4o chat completions with persona injection and optional token streaming."""
     if not settings.OPENAI_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -51,10 +65,26 @@ async def call_openai_chat(messages: List[Dict[str, str]], model: Optional[str] 
         "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {"model": model, "messages": messages, "temperature": 0.7}
+    augmented_messages = _inject_persona_context(messages, persona=persona, goals=goals)
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": augmented_messages,
+        "temperature": temperature,
+    }
+    if stream:
+        payload["stream"] = True
 
     try:
-        async with httpx.AsyncClient(timeout=40) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
+            if stream:
+                data_text = await _stream_chat_completion(
+                    client,
+                    headers=headers,
+                    payload=payload,
+                    on_token=on_token,
+                )
+                return data_text
+
             response = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers=headers,
@@ -75,11 +105,100 @@ async def call_openai_chat(messages: List[Dict[str, str]], model: Optional[str] 
             detail="OpenAI did not return any choices",
         )
 
-    return choices[0]["message"]["content"].strip()
+    content = choices[0]["message"]["content"].strip()
+    if on_token:
+        await _invoke_callback(on_token, content)
+    return content
+
+
+def _inject_persona_context(
+    messages: List[Dict[str, str]],
+    *,
+    persona: Optional[Dict[str, Any]],
+    goals: Optional[Sequence[str]],
+) -> List[Dict[str, str]]:
+    """Augment the first system message with persona and goal descriptors."""
+    if not persona and not goals:
+        return list(messages)
+
+    persona_lines: List[str] = []
+    if persona:
+        name = persona.get("name")
+        tone = persona.get("tone")
+        description = persona.get("description")
+        if name:
+            persona_lines.append(f"Persona Name: {name}")
+        if tone:
+            persona_lines.append(f"Desired tone: {tone}")
+        if description:
+            persona_lines.append(description)
+        voice = persona.get("voice_id")
+        if voice:
+            persona_lines.append(f"Voice preference: {voice}")
+    if goals:
+        persona_lines.append("Goals: " + "; ".join(goals))
+
+    if not persona_lines:
+        return list(messages)
+
+    injected_block = "\n".join(persona_lines)
+    if messages and messages[0].get("role") == "system":
+        merged = messages[0].copy()
+        merged["content"] = f"{merged['content']}\n{injected_block}"
+        return [merged] + [msg.copy() for msg in messages[1:]]
+
+    return [{"role": "system", "content": injected_block}] + [msg.copy() for msg in messages]
+
+
+async def _stream_chat_completion(
+    client: httpx.AsyncClient,
+    *,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    on_token: TokenCallback = None,
+) -> str:
+    """Stream GPT-4o deltas, yielding tokens to the provided callback."""
+    url = "https://api.openai.com/v1/chat/completions"
+    collected: List[str] = []
+    async with client.stream("POST", url, headers=headers, json=payload) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+            if line.startswith("data: "):
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                deltas = chunk.get("choices", [])
+                if not deltas:
+                    continue
+                delta = deltas[0].get("delta", {})
+                if not delta:
+                    continue
+                content_piece = delta.get("content")
+                if content_piece:
+                    collected.append(content_piece)
+                    if on_token:
+                        await _invoke_callback(on_token, content_piece)
+    return "".join(collected).strip()
+
+
+async def _invoke_callback(callback: TokenCallback, token: str) -> None:
+    """Safely await token callbacks without propagating exceptions."""
+    try:
+        result = callback(token)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:  # pragma: no cover - callback safety
+        pass
 
 
 async def generate_strategy_context(strategy_payload: Dict[str, Any]) -> str:
-    """Build a textual description of the strategy to feed into LLM."""
+    """Flatten relevant strategy sections into a prompt-friendly string."""
     lines: List[str] = []
     scripts = strategy_payload.get("scripts") or {}
 
