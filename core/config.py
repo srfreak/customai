@@ -44,7 +44,7 @@ class Settings:
     TWILIO_PUBLIC_BASE_URL: str = os.getenv("TWILIO_PUBLIC_BASE_URL", "")
     AUDIO_UPLOAD_URL: str = os.getenv("AUDIO_UPLOAD_URL", "")
     TWILIO_STREAM_URL: str = os.getenv("TWILIO_STREAM_URL", "")
-    SIMULATE_CALL_FLOW: bool = os.getenv("SIMULATE_CALL_FLOW", "true").lower() == "true"
+    SIMULATE_CALL_FLOW: bool = os.getenv("SIMULATE_CALL_FLOW", "false").lower() == "true"
 
     # Public base for building absolute URLs
     API_BASE_URL: str = os.getenv("API_BASE_URL", "")

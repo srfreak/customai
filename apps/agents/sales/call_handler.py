@@ -8,8 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from apps.agents.sales import services
-from apps.agents.sales.agent import SalesAgent, STAGE_SEQUENCE
-from apps.agents.sales.simulations import run_simulated_dialogue
+from apps.agents.sales.agent import SalesAgent
 from core.auth import RoleChecker
 from core.config import settings
 from core.database import get_collection
@@ -188,21 +187,10 @@ async def start_call(
     audio_urls: List[str] = []
     if call_status != CALL_STATUS_FAILED:
         strategy_context = await services.generate_strategy_context(strategy_payload)
-        if settings.SIMULATE_CALL_FLOW:
-            conversation.extend(
-                await run_simulated_dialogue(
-                    agent=sales_agent,
-                    lead_name=request.lead_name,
-                    voice_id=voice_id,
-                    audio_urls=audio_urls,
-                    voice_failures=voice_failures,
-                )
-            )
-        else:
-            logger.info(
-                "Live call mode active; waiting for Twilio stream events for lead input",
-                extra={"call_sid": twilio_call_sid, "conversation_id": sales_agent.conversation_id},
-            )
+        logger.info(
+            "Live call mode active; waiting for Twilio stream events for lead input",
+            extra={"call_sid": twilio_call_sid, "conversation_id": sales_agent.conversation_id},
+        )
 
     key_phrases = _extract_key_phrases(conversation)
     logger.info(
