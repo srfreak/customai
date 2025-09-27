@@ -362,3 +362,9 @@ async def media_stream_endpoint(websocket: WebSocket):
         if greeting_task:
             greeting_task.cancel()
         await websocket.close()
+
+
+@router.websocket("/api/v1/integrations/telephony/twilio/stream")
+async def media_stream_endpoint_direct(websocket: WebSocket):
+    """Expose the websocket under its fully-qualified path for reverse proxies."""
+    await media_stream_endpoint(websocket)
