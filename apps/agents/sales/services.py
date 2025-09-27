@@ -5,6 +5,7 @@ import asyncio
 import base64
 import inspect
 import json
+import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
@@ -22,6 +23,8 @@ from shared.constants import (
     CALL_STATUS_COMPLETED,
     CALL_STATUS_IN_PROGRESS,
 )
+
+logger = logging.getLogger(__name__)
 
 _STRATEGY_FIELDS_PRIORITY: Sequence[str] = (
     "greeting",
@@ -306,9 +309,8 @@ async def create_twilio_call(client: Client, to_phone: str, greeting: str) -> Di
     try:
         webhook_url = settings.TWILIO_CALL_WEBHOOK_URL
         if not webhook_url:
-            # Fallback to public base + Flask voice route if provided
-            if settings.API_BASE_URL:
-                webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
+            if settings.TWILIO_PUBLIC_BASE_URL:
+                webhook_url = f"{settings.TWILIO_PUBLIC_BASE_URL.rstrip('/')}/twilio/voice"
             elif settings.API_BASE_URL:
                 webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
             else:
@@ -316,6 +318,10 @@ async def create_twilio_call(client: Client, to_phone: str, greeting: str) -> Di
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Twilio call webhook URL not configured",
                 )
+        logger.info(
+            "Twilio call create request",
+            extra={"to": to_phone, "from": settings.TWILIO_PHONE_NUMBER, "webhook": webhook_url},
+        )
 
         call = await asyncio.to_thread(
             client.calls.create,
@@ -323,8 +329,21 @@ async def create_twilio_call(client: Client, to_phone: str, greeting: str) -> Di
             from_=settings.TWILIO_PHONE_NUMBER,
             url=webhook_url,
         )
-        return {"sid": call.sid, "status": getattr(call, "status", CALL_STATUS_IN_PROGRESS)}
+        payload = {
+            "sid": call.sid,
+            "status": getattr(call, "status", CALL_STATUS_IN_PROGRESS),
+            "direction": getattr(call, "direction", None),
+            "to": getattr(call, "to", to_phone),
+            "from": getattr(call, "from_", settings.TWILIO_PHONE_NUMBER),
+        }
+        logger.info("Twilio call created", extra=payload)
+        return payload
     except TwilioRestException as exc:
+        logger.error(
+            "Twilio REST error during call create",
+            exc_info=True,
+            extra={"to": to_phone, "msg": str(exc), "code": exc.code},
+        )
         return {"sid": None, "status": CALL_STATUS_FAILED, "error": str(exc)}
 
 

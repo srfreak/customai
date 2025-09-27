@@ -124,6 +124,14 @@ async def start_call(
 
     failure_reason: Optional[str] = None
     call_reference = sales_agent.conversation_id
+    logger.info(
+        "start_call invoked",
+        extra={
+            "lead_phone": request.lead_phone,
+            "lead_name": request.lead_name,
+            "agent_id": agent_identifier,
+        },
+    )
 
     try:
         client = services.get_twilio_client()
@@ -162,7 +170,7 @@ async def start_call(
     strategy_context: Optional[str] = None
     voice_failures: List[str] = []
     audio_urls: List[str] = []
-    if call_status != CALL_STATUS_FAILED:
+    if call_status != CALL_STATUS_FAILED and settings.SIMULATE_CALL_FLOW:
         strategy_context = await services.generate_strategy_context(strategy_payload)
         generated_lead_prompts = {
             "greeting": request.lead_name and f"Hi, this is {request.lead_name}." or "Hello!",
@@ -245,6 +253,11 @@ async def start_call(
 
             if current_stage == "closing":
                 break
+    elif call_status != CALL_STATUS_FAILED:
+        logger.info(
+            "Live call mode active; waiting for Twilio stream events for lead input",
+            extra={"call_sid": twilio_call_sid, "conversation_id": sales_agent.conversation_id},
+        )
 
     key_phrases = _extract_key_phrases(conversation)
     status_label = CALL_STATUS_COMPLETED if call_status != CALL_STATUS_FAILED else CALL_STATUS_FAILED
