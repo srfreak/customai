@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import logging
-import base64
 from datetime import datetime
 from typing import List, Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from apps.agents.sales import services
 from apps.agents.sales.agent import SalesAgent, STAGE_SEQUENCE
+from apps.agents.sales.simulations import run_simulated_dialogue
 from core.auth import RoleChecker
 from core.config import settings
 from core.database import get_collection
@@ -187,131 +186,23 @@ async def start_call(
     strategy_context: Optional[str] = None
     voice_failures: List[str] = []
     audio_urls: List[str] = []
-    if call_status != CALL_STATUS_FAILED and settings.SIMULATE_CALL_FLOW:
+    if call_status != CALL_STATUS_FAILED:
         strategy_context = await services.generate_strategy_context(strategy_payload)
-        generated_lead_prompts = {
-            "greeting": request.lead_name and f"Hi, this is {request.lead_name}." or "Hello!",
-            "pitch": "Can you tell me more?",
-            "faqs": "I have a quick question.",
-            "objections": "I'm not sure this fits my budget.",
-            "closing": "What happens next?",
-        }
-
-        for current_stage in STAGE_SEQUENCE:
-            lead_input = generated_lead_prompts.get(current_stage, "")
-            if current_stage == "greeting" and not lead_input:
-                lead_input = "Lead answers the call."
-
-            try:
-                response_payload = await sales_agent.generate_sales_response(
-                    user_input=lead_input or "Start the conversation",
-                    stage=current_stage,
+        if settings.SIMULATE_CALL_FLOW:
+            conversation.extend(
+                await run_simulated_dialogue(
+                    agent=sales_agent,
                     lead_name=request.lead_name,
+                    voice_id=voice_id,
+                    audio_urls=audio_urls,
+                    voice_failures=voice_failures,
                 )
-            except HTTPException as chat_exc:
-                failure_reason = chat_exc.detail if isinstance(chat_exc.detail, str) else str(chat_exc.detail)
-                logger.error("Failed to generate agent response: %s", failure_reason)
-                call_status = CALL_STATUS_FAILED
-                break
-
-            agent_reply = response_payload["text"]
+            )
+        else:
             logger.info(
-                "Generated agent reply",
-                extra={
-                    "stage": current_stage,
-                    "lead_input": lead_input,
-                    "reply_excerpt": agent_reply[:120],
-                    "memory_id": response_payload.get("memory_id"),
-                },
+                "Live call mode active; waiting for Twilio stream events for lead input",
+                extra={"call_sid": twilio_call_sid, "conversation_id": sales_agent.conversation_id},
             )
-
-            try:
-                logger.info(
-                    "Submitting text to ElevenLabs",
-                    extra={"stage": current_stage, "voice_id": voice_id},
-                )
-                voice_payload = await sales_agent.speak_response(agent_reply, voice_id=voice_id)
-                logger.info(
-                    "Received ElevenLabs response",
-                    extra={
-                        "stage": current_stage,
-                        "has_audio": bool(voice_payload.get("audio_base64")),
-                        "duration": voice_payload.get("duration"),
-                    },
-                )
-            except HTTPException as synth_exc:
-                detail = synth_exc.detail if isinstance(synth_exc.detail, str) else str(synth_exc.detail)
-                voice_failures.append(detail)
-                logger.error("Voice synthesis failed: %s", detail)
-                voice_payload = {"audio_base64": None, "duration": None}
-            else:
-                audio_b64 = voice_payload.get("audio_base64")
-                upload_endpoint = settings.AUDIO_UPLOAD_URL or (
-                    f"{settings.TWILIO_PUBLIC_BASE_URL.rstrip('/')}/audio/upload"
-                    if settings.TWILIO_PUBLIC_BASE_URL
-                    else ""
-                )
-                if audio_b64 and upload_endpoint:
-                    try:
-                        audio_bytes = base64.b64decode(audio_b64)
-                        async with httpx.AsyncClient(timeout=30) as client:
-                            files = {
-                                "file": (
-                                    f"clip_{datetime.utcnow().timestamp():.0f}.mp3",
-                                    audio_bytes,
-                                    "audio/mpeg",
-                                )
-                            }
-                            upload_response = await client.post(upload_endpoint, files=files)
-                            upload_response.raise_for_status()
-                            upload_data = upload_response.json()
-                            public_url = upload_data.get("url")
-                            if public_url:
-                                audio_urls.append(public_url)
-                                logger.info(
-                                    "Uploaded audio clip",
-                                    extra={
-                                        "stage": current_stage,
-                                        "public_url": public_url,
-                                        "upload_endpoint": upload_endpoint,
-                                    },
-                                )
-                            else:
-                                voice_failures.append("Audio upload succeeded without URL response")
-                                logger.warning("Audio upload missing URL: %s", upload_data)
-                    except (httpx.HTTPError, ValueError) as upload_exc:
-                        logger.error("Audio upload failed: %s", upload_exc)
-                        voice_failures.append(f"Audio upload failed: {upload_exc}")
-                elif audio_b64:
-                    message = "Audio upload endpoint not configured"
-                    voice_failures.append(message)
-                    logger.warning(message)
-
-            conversation.append(
-                ConversationTurn(
-                    stage=current_stage,
-                    lead_input=lead_input or "",
-                    agent_reply=agent_reply,
-                    audio_base64=voice_payload.get("audio_base64"),
-                    duration=voice_payload.get("duration"),
-                )
-            )
-            logger.info(
-                "Appended conversation turn",
-                extra={
-                    "stage": current_stage,
-                    "lead_input_excerpt": (lead_input or "")[:80],
-                    "reply_excerpt": agent_reply[:120],
-                },
-            )
-
-            if current_stage == "closing":
-                break
-    elif call_status != CALL_STATUS_FAILED:
-        logger.info(
-            "Live call mode active; waiting for Twilio stream events for lead input",
-            extra={"call_sid": twilio_call_sid, "conversation_id": sales_agent.conversation_id},
-        )
 
     key_phrases = _extract_key_phrases(conversation)
     logger.info(
