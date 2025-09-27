@@ -238,7 +238,8 @@ async def handle_voice_call():
         response = VoiceResponse()
         connect = response.connect()
         stream_url = _resolve_stream_url()
-        connect.stream(url=stream_url, track="inbound_track")
+        # Do not specify track to avoid 31941 errors; defaults to inbound audio
+        connect.stream(url=stream_url)
         logger.info("Issued TwiML stream to %s", stream_url)
         return Response(content=str(response), media_type="application/xml")
     except Exception as e:
@@ -326,11 +327,82 @@ async def _send_audio_prompt(websocket: WebSocket, stream_sid: str, text: str, v
     )
 
 
+def _mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
+    """Decode raw 8kHz μ-law mono bytes to WAV using ffmpeg."""
+    try:
+        process = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "mulaw",
+                "-ar",
+                "8000",
+                "-ac",
+                "1",
+                "-i",
+                "pipe:0",
+                "-f",
+                "wav",
+                "pipe:1",
+            ],
+            input=mulaw_bytes,
+            stdout=subprocess.PIPE,
+            check=True,
+        )
+        return process.stdout
+    except FileNotFoundError as exc:
+        raise TelephonyException("ffmpeg missing for μ-law decoding") from exc
+    except subprocess.CalledProcessError as exc:
+        raise TelephonyException(f"ffmpeg failed to decode μ-law: {exc}") from exc
+
+
+async def _transcribe_with_openai(wav_bytes: bytes) -> str:
+    """Send a small WAV chunk to OpenAI Whisper for transcription."""
+    if not settings.OPENAI_API_KEY:
+        return ""
+    headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
+    files = {
+        "file": ("chunk.wav", wav_bytes, "audio/wav"),
+        "model": (None, "whisper-1"),
+        "response_format": (None, "json"),
+        # Optionally: temperature, language, etc.
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("text", "").strip()
+
+
+async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, voice_id: Optional[str]) -> None:
+    """TTS via ElevenLabs and stream μ-law frames back to Twilio."""
+    try:
+        tts = await services.synthesise_elevenlabs_voice(text=text, voice_id=voice_id)
+        chunks = _mp3_to_mulaw_chunks(tts["audio_base64"])
+    except HTTPException as exc:
+        logger.error("TTS failed: %s", exc.detail)
+        return
+    for chunk in chunks:
+        await websocket.send_text(
+            json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}})
+        )
+        await asyncio.sleep(0.02)
+
+
 @router.websocket("/stream")
 async def media_stream_endpoint(websocket: WebSocket):
     await websocket.accept()
     stream_sid: Optional[str] = None
     greeting_task: Optional[asyncio.Task] = None
+    # Simple rolling μ-law buffer and last-transcript tracking
+    inbound_buffer = bytearray()
+    last_transcript = ""
+    processing = False
 
     try:
         while True:
@@ -352,7 +424,56 @@ async def media_stream_endpoint(websocket: WebSocket):
                     )
                 )
             elif event == "media":
-                pass  # Placeholder for streaming ASR pipeline
+                media = payload.get("media", {})
+                b64 = media.get("payload")
+                if not b64:
+                    continue
+                try:
+                    inbound_buffer += base64.b64decode(b64)
+                except Exception:
+                    continue
+
+                # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
+                if not processing and len(inbound_buffer) >= 8000:
+                    processing = True
+                    # Take up to 2 seconds worth to reduce latency
+                    take = min(len(inbound_buffer), 16000)
+                    chunk = bytes(inbound_buffer[:take])
+                    del inbound_buffer[:take]
+
+                    # Decode μ-law to WAV and transcribe
+                    try:
+                        wav = _mulaw_to_wav(chunk)
+                        transcript = await _transcribe_with_openai(wav)
+                    except Exception as exc:
+                        logger.error("Transcription error: %s", exc)
+                        transcript = ""
+
+                    if transcript and transcript != last_transcript:
+                        last_transcript = transcript
+                        logger.info("Caller said: %s", transcript)
+                        # Generate reply and speak it
+                        try:
+                            # Minimal inline reply using OpenAI chat helper
+                            reply = await services.call_openai_chat(
+                                [
+                                    {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
+                                    {"role": "user", "content": transcript},
+                                ],
+                                model=settings.OPENAI_MODEL,
+                            )
+                        except HTTPException as exc:
+                            logger.error("LLM error: %s", exc.detail)
+                            reply = "Thanks for sharing. Could you repeat that?"
+
+                        await _speak_and_stream(
+                            websocket=websocket,
+                            stream_sid=stream_sid or "",
+                            text=reply,
+                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                        )
+
+                    processing = False
             elif event == "stop":
                 logger.info("Twilio stream stopped: %s", stream_sid)
                 break
