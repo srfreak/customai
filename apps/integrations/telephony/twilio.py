@@ -238,7 +238,7 @@ async def handle_voice_call():
         response = VoiceResponse()
         connect = response.connect()
         stream_url = _resolve_stream_url()
-        connect.stream(url=stream_url, track="both_tracks")
+        connect.stream(url=stream_url, track="inbound_track")
         logger.info("Issued TwiML stream to %s", stream_url)
         return Response(content=str(response), media_type="application/xml")
     except Exception as e:
