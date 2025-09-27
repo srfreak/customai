@@ -8,6 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         netcat-openbsd \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pipenv or other dependencies here if needed

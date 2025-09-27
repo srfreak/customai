@@ -4,6 +4,9 @@ import json
 import logging
 import subprocess
 from typing import Optional, Dict, Any, List
+import io
+import wave
+import audioop
 
 from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -328,35 +331,16 @@ async def _send_audio_prompt(websocket: WebSocket, stream_sid: str, text: str, v
 
 
 def _mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
-    """Decode raw 8kHz μ-law mono bytes to WAV using ffmpeg."""
-    try:
-        process = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "mulaw",
-                "-ar",
-                "8000",
-                "-ac",
-                "1",
-                "-i",
-                "pipe:0",
-                "-f",
-                "wav",
-                "pipe:1",
-            ],
-            input=mulaw_bytes,
-            stdout=subprocess.PIPE,
-            check=True,
-        )
-        return process.stdout
-    except FileNotFoundError as exc:
-        raise TelephonyException("ffmpeg missing for μ-law decoding") from exc
-    except subprocess.CalledProcessError as exc:
-        raise TelephonyException(f"ffmpeg failed to decode μ-law: {exc}") from exc
+    """Decode raw 8kHz μ-law mono into a WAV container (pure Python)."""
+    # Convert μ-law to 16-bit linear PCM using audioop
+    pcm16 = audioop.ulaw2lin(mulaw_bytes, 2)  # 2 bytes/sample
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(8000)
+        wf.writeframes(pcm16)
+    return buf.getvalue()
 
 
 async def _transcribe_with_openai(wav_bytes: bytes) -> str:
