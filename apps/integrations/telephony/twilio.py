@@ -7,7 +7,6 @@ from typing import Optional, Dict, Any, List
 import io
 import wave
 import audioop
-import time
 
 from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -389,61 +388,8 @@ async def media_stream_endpoint(websocket: WebSocket):
     inbound_buffer = bytearray()
     last_transcript = ""
     processing = False
-    last_media_ts = time.monotonic()
-    silence_threshold = 0.7  # seconds of no incoming frames to treat as end-of-utterance
-    min_buffer_bytes = 8000  # ~1s @ 8kHz μ-law
-    processor_task: Optional[asyncio.Task] = None
-
-    async def process_if_ready():
-        nonlocal processing, last_transcript, inbound_buffer
-        if processing:
-            return
-        now = time.monotonic()
-        if len(inbound_buffer) < min_buffer_bytes:
-            return
-        if (now - last_media_ts) < silence_threshold:
-            return
-        processing = True
-        # Take up to 2 seconds of audio for transcription
-        take = min(len(inbound_buffer), 16000)
-        chunk = bytes(inbound_buffer[:take])
-        del inbound_buffer[:take]
-        try:
-            wav = _mulaw_to_wav(chunk)
-            transcript = await _transcribe_with_openai(wav)
-        except Exception as exc:
-            logger.error("Transcription error: %s", exc)
-            transcript = ""
-        if transcript and transcript != last_transcript:
-            last_transcript = transcript
-            logger.info("Caller said: %s", transcript)
-            try:
-                reply = await services.call_openai_chat(
-                    [
-                        {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
-                        {"role": "user", "content": transcript},
-                    ],
-                    model=settings.OPENAI_MODEL,
-                )
-            except HTTPException as exc:
-                logger.error("LLM error: %s", exc.detail)
-                reply = "Thanks for sharing. Could you repeat that?"
-            await _speak_and_stream(
-                websocket=websocket,
-                stream_sid=stream_sid or "",
-                text=reply,
-                voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
-            )
-        processing = False
 
     try:
-        # background processor to detect end of utterances by silence
-        async def background_processor():
-            while True:
-                await asyncio.sleep(0.1)
-                await process_if_ready()
-
-        processor_task = asyncio.create_task(background_processor())
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
@@ -477,10 +423,54 @@ async def media_stream_endpoint(websocket: WebSocket):
                     if not isinstance(decoded, (bytes, bytearray)):
                         continue
                     inbound_buffer += decoded
-                    last_media_ts = time.monotonic()
                 except (binascii.Error, ValueError) as exc:
                     # Corrupt frame; skip silently
                     continue
+
+                # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
+                if not processing and len(inbound_buffer) >= 8000:
+                    processing = True
+                    # Take up to 2 seconds worth to reduce latency
+                    take = min(len(inbound_buffer), 16000)
+                    chunk = bytes(inbound_buffer[:take])
+                    del inbound_buffer[:take]
+
+                    # Decode μ-law to WAV and transcribe
+                    try:
+                        if isinstance(chunk, str):
+                            # Shouldn't happen, but guard against wrong type
+                            chunk = chunk.encode("latin1", errors="ignore")
+                        wav = _mulaw_to_wav(chunk)
+                        transcript = await _transcribe_with_openai(wav)
+                    except Exception as exc:
+                        logger.error("Transcription error: %s", exc)
+                        transcript = ""
+
+                    if transcript and transcript != last_transcript:
+                        last_transcript = transcript
+                        logger.info("Caller said: %s", transcript)
+                        # Generate reply and speak it
+                        try:
+                            # Minimal inline reply using OpenAI chat helper
+                            reply = await services.call_openai_chat(
+                                [
+                                    {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
+                                    {"role": "user", "content": transcript},
+                                ],
+                                model=settings.OPENAI_MODEL,
+                            )
+                        except HTTPException as exc:
+                            logger.error("LLM error: %s", exc.detail)
+                            reply = "Thanks for sharing. Could you repeat that?"
+
+                        await _speak_and_stream(
+                            websocket=websocket,
+                            stream_sid=stream_sid or "",
+                            text=reply,
+                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                        )
+
+                    processing = False
             elif event == "stop":
                 logger.info("Twilio stream stopped: %s", stream_sid)
                 break
@@ -489,8 +479,6 @@ async def media_stream_endpoint(websocket: WebSocket):
     finally:
         if greeting_task:
             greeting_task.cancel()
-        if processor_task:
-            processor_task.cancel()
         await websocket.close()
 
 
