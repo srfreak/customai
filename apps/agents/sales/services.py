@@ -5,7 +5,6 @@ import asyncio
 import base64
 import inspect
 import json
-import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
@@ -23,8 +22,6 @@ from shared.constants import (
     CALL_STATUS_COMPLETED,
     CALL_STATUS_IN_PROGRESS,
 )
-
-logger = logging.getLogger(__name__)
 
 _STRATEGY_FIELDS_PRIORITY: Sequence[str] = (
     "greeting",
@@ -256,14 +253,6 @@ async def synthesise_elevenlabs_voice(text: str, voice_id: Optional[str]) -> Dic
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             audio_bytes = response.content
-    except httpx.RequestError as exc:
-        host = httpx.URL(url).host
-        detail = (
-            f"Unable to reach ElevenLabs host '{host}'."
-            " Verify outbound DNS/network connectivity from the API container."
-        )
-        logger.error("ElevenLabs request error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code
         message = exc.response.text or exc.response.reason_phrase
