@@ -75,6 +75,14 @@ async def _persist_memory(
         "updated_at": datetime.utcnow(),
     }
     await memory_collection.insert_one(entry)
+    logger.info(
+        "Persisted conversation transcript",
+        extra={
+            "call_id": call_id,
+            "turns": len(conversation),
+            "agent_id": agent_id,
+        },
+    )
 
 
 def _extract_key_phrases(conversation: List[ConversationTurn]) -> List[str]:
@@ -96,6 +104,15 @@ async def start_call(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No strategy found for user. Upload a strategy first.",
         )
+
+    logger.info(
+        "Fetched latest strategy",
+        extra={
+            "user_id": user["user_id"],
+            "strategy_id": strategy.get("strategy_id"),
+            "agent_id": request.agent_id,
+        },
+    )
 
     strategy_payload = strategy.get("payload", {})
     persona_payload = strategy_payload.get("persona") or {}
@@ -198,9 +215,30 @@ async def start_call(
                 break
 
             agent_reply = response_payload["text"]
+            logger.info(
+                "Generated agent reply",
+                extra={
+                    "stage": current_stage,
+                    "lead_input": lead_input,
+                    "reply_excerpt": agent_reply[:120],
+                    "memory_id": response_payload.get("memory_id"),
+                },
+            )
 
             try:
+                logger.info(
+                    "Submitting text to ElevenLabs",
+                    extra={"stage": current_stage, "voice_id": voice_id},
+                )
                 voice_payload = await sales_agent.speak_response(agent_reply, voice_id=voice_id)
+                logger.info(
+                    "Received ElevenLabs response",
+                    extra={
+                        "stage": current_stage,
+                        "has_audio": bool(voice_payload.get("audio_base64")),
+                        "duration": voice_payload.get("duration"),
+                    },
+                )
             except HTTPException as synth_exc:
                 detail = synth_exc.detail if isinstance(synth_exc.detail, str) else str(synth_exc.detail)
                 voice_failures.append(detail)
@@ -230,6 +268,14 @@ async def start_call(
                             public_url = upload_data.get("url")
                             if public_url:
                                 audio_urls.append(public_url)
+                                logger.info(
+                                    "Uploaded audio clip",
+                                    extra={
+                                        "stage": current_stage,
+                                        "public_url": public_url,
+                                        "upload_endpoint": upload_endpoint,
+                                    },
+                                )
                             else:
                                 voice_failures.append("Audio upload succeeded without URL response")
                                 logger.warning("Audio upload missing URL: %s", upload_data)
@@ -250,6 +296,14 @@ async def start_call(
                     duration=voice_payload.get("duration"),
                 )
             )
+            logger.info(
+                "Appended conversation turn",
+                extra={
+                    "stage": current_stage,
+                    "lead_input_excerpt": (lead_input or "")[:80],
+                    "reply_excerpt": agent_reply[:120],
+                },
+            )
 
             if current_stage == "closing":
                 break
@@ -260,6 +314,10 @@ async def start_call(
         )
 
     key_phrases = _extract_key_phrases(conversation)
+    logger.info(
+        "Extracted key phrases",
+        extra={"phrases": key_phrases, "count": len(key_phrases)},
+    )
     status_label = CALL_STATUS_COMPLETED if call_status != CALL_STATUS_FAILED else CALL_STATUS_FAILED
     lead_status = "hung_up" if call_status == CALL_STATUS_FAILED else "interested"
     if call_status == CALL_STATUS_FAILED and not failure_reason:
@@ -280,6 +338,18 @@ async def start_call(
         audio_urls=audio_urls,
     )
 
+    logger.info(
+        "Persisted call record",
+        extra={
+            "call_id": call_id,
+            "status": status_label,
+            "lead_status": lead_status,
+            "conversation_turns": len(conversation),
+            "audio_urls_count": len(audio_urls),
+            "failure_reason": failure_reason,
+        },
+    )
+
     excel_path = log_call_summary(
         directory=settings.CALL_LOG_DIR,
         user_id=user["user_id"],
@@ -292,6 +362,8 @@ async def start_call(
         key_phrases=key_phrases,
         call_id=call_id,
     )
+
+    logger.info("Generated Excel log", extra={"excel_path": excel_path, "call_id": call_id})
 
     if twilio_call_sid and audio_urls:
         try:
@@ -307,6 +379,16 @@ async def start_call(
         agent_id=agent_identifier,
         call_id=call_id,
         conversation=conversation,
+    )
+
+    logger.info(
+        "start_call completed",
+        extra={
+            "call_id": call_id,
+            "status": status_label,
+            "final_voice_failures": voice_failures,
+            "twilio_sid": twilio_call_sid,
+        },
     )
 
     return StartCallResponse(
