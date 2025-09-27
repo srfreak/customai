@@ -16,7 +16,6 @@ from core.config import settings
 from shared.exceptions import TelephonyException
 from apps.agents.sales import services
 import httpx
-import binascii
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
 
@@ -351,13 +350,13 @@ async def _transcribe_with_openai(wav_bytes: bytes) -> str:
     headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
     files = {
         "file": ("chunk.wav", wav_bytes, "audio/wav"),
-    }
-    data = {
-        "model": "whisper-1",
+        "model": (None, "whisper-1"),
+        "response_format": (None, "json"),
+        # Optionally: temperature, language, etc.
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data
+            "https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files
         )
         resp.raise_for_status()
         data = resp.json()
@@ -413,18 +412,9 @@ async def media_stream_endpoint(websocket: WebSocket):
                 b64 = media.get("payload")
                 if not b64:
                     continue
-                # Ensure b64 is str, decode to bytes
                 try:
-                    if isinstance(b64, str):
-                        decoded = base64.b64decode(b64, validate=False)
-                    else:
-                        # Unexpected type; skip
-                        continue
-                    if not isinstance(decoded, (bytes, bytearray)):
-                        continue
-                    inbound_buffer += decoded
-                except (binascii.Error, ValueError) as exc:
-                    # Corrupt frame; skip silently
+                    inbound_buffer += base64.b64decode(b64)
+                except Exception:
                     continue
 
                 # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
@@ -437,9 +427,6 @@ async def media_stream_endpoint(websocket: WebSocket):
 
                     # Decode μ-law to WAV and transcribe
                     try:
-                        if isinstance(chunk, str):
-                            # Shouldn't happen, but guard against wrong type
-                            chunk = chunk.encode("latin1", errors="ignore")
                         wav = _mulaw_to_wav(chunk)
                         transcript = await _transcribe_with_openai(wav)
                     except Exception as exc:
