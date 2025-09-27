@@ -307,8 +307,8 @@ async def create_twilio_call(client: Client, to_phone: str, greeting: str) -> Di
         webhook_url = settings.TWILIO_CALL_WEBHOOK_URL
         if not webhook_url:
             # Fallback to public base + Flask voice route if provided
-            if settings.TWILIO_PUBLIC_BASE_URL:
-                webhook_url = f"{settings.TWILIO_PUBLIC_BASE_URL.rstrip('/')}/twilio/voice"
+            if settings.API_BASE_URL:
+                webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
             elif settings.API_BASE_URL:
                 webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
             else:
