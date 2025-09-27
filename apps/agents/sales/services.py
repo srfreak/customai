@@ -307,17 +307,16 @@ def get_twilio_client() -> Client:
 async def create_twilio_call(client: Client, to_phone: str, greeting: str) -> Dict[str, Any]:
     """Attempt to start a Twilio call returning call metadata."""
     try:
-        webhook_url = settings.API_BASE_URL
-        if not webhook_url:
-            if settings.API_BASE_URL:
-                webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/twilio/voice"
-            elif settings.API_BASE_URL:
-                webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Twilio call webhook URL not configured",
-                )
+        
+        if settings.API_BASE_URL:
+            webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
+        # elif settings.API_BASE_URL:
+        #     webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Twilio call webhook URL not configured",
+            )
         logger.info(
             "Twilio call create request",
             extra={"to": to_phone, "from": settings.TWILIO_PHONE_NUMBER, "webhook": webhook_url},
