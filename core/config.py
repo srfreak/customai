@@ -31,6 +31,7 @@ class Settings:
     ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
     ELEVENLABS_BASE_URL: str = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")
     ELEVENLABS_DEFAULT_VOICE_ID: str = os.getenv("ELEVENLABS_DEFAULT_VOICE_ID", "")
+    ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_monolingual_v1")
     
     # Twilio settings
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -43,6 +44,9 @@ class Settings:
     TWILIO_PUBLIC_BASE_URL: str = os.getenv("TWILIO_PUBLIC_BASE_URL", "")
     AUDIO_UPLOAD_URL: str = os.getenv("AUDIO_UPLOAD_URL", "")
     TWILIO_STREAM_URL: str = os.getenv("TWILIO_STREAM_URL", "")
+
+    # Public base for building absolute URLs
+    API_BASE_URL: str = os.getenv("API_BASE_URL", "")
 
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")

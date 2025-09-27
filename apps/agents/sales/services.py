@@ -125,7 +125,7 @@ async def synthesise_elevenlabs_voice(text: str, voice_id: Optional[str]) -> Dic
     }
     payload = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
+        "model_id": settings.ELEVENLABS_MODEL or "eleven_monolingual_v1",
         "voice_settings": {"stability": 0.4, "similarity_boost": 0.8},
     }
 
@@ -187,10 +187,16 @@ async def create_twilio_call(client: Client, to_phone: str, greeting: str) -> Di
     try:
         webhook_url = settings.TWILIO_CALL_WEBHOOK_URL
         if not webhook_url:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Twilio call webhook URL not configured",
-            )
+            # Fallback to public base + Flask voice route if provided
+            if settings.TWILIO_PUBLIC_BASE_URL:
+                webhook_url = f"{settings.TWILIO_PUBLIC_BASE_URL.rstrip('/')}/twilio/voice"
+            elif settings.API_BASE_URL:
+                webhook_url = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Twilio call webhook URL not configured",
+                )
 
         call = await asyncio.to_thread(
             client.calls.create,

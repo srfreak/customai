@@ -71,11 +71,23 @@ class TwilioService:
                 }
             
             # Make the call
+            # Determine webhook URL preference order
+            if callback_url:
+                webhook = f"{callback_url.rstrip('/')}/voice"
+            elif settings.TWILIO_CALL_WEBHOOK_URL:
+                webhook = settings.TWILIO_CALL_WEBHOOK_URL
+            elif settings.TWILIO_PUBLIC_BASE_URL:
+                webhook = f"{settings.TWILIO_PUBLIC_BASE_URL.rstrip('/')}/twilio/voice"
+            elif settings.API_BASE_URL:
+                webhook = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/voice"
+            else:
+                raise TelephonyException("No webhook base configured for Twilio voice callback")
+
             call = self.client.calls.create(
                 to=to_number,
                 from_=from_number,
-                url=f"{callback_url}/voice" if callback_url else f"{settings.API_BASE_URL}/api/v1/integrations/telephony/twilio/voice",
-                method="GET"
+                url=webhook,
+                method="POST",
             )
             
             return {
