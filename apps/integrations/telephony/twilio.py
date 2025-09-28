@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 from typing import Optional, Dict, Any, List
+import time
 import io
 import wave
 import audioop
@@ -388,6 +389,8 @@ async def media_stream_endpoint(websocket: WebSocket):
     inbound_buffer = bytearray()
     last_transcript = ""
     processing = False
+    # Collect conversational turns for end-of-call summary
+    conversation: List[Dict[str, Any]] = []
 
     try:
         while True:
@@ -463,6 +466,21 @@ async def media_stream_endpoint(websocket: WebSocket):
                             logger.error("LLM error: %s", exc.detail)
                             reply = "Thanks for sharing. Could you repeat that?"
 
+                        # Log and store this turn
+                        turn = {
+                            "ts": time.time(),
+                            "stream_sid": stream_sid,
+                            "user": transcript,
+                            "agent": reply,
+                        }
+                        conversation.append(turn)
+                        logger.info(
+                            "Turn %d | User: %s | Agent: %s",
+                            len(conversation),
+                            transcript[:160],
+                            reply[:160],
+                        )
+
                         await _speak_and_stream(
                             websocket=websocket,
                             stream_sid=stream_sid or "",
@@ -473,6 +491,15 @@ async def media_stream_endpoint(websocket: WebSocket):
                     processing = False
             elif event == "stop":
                 logger.info("Twilio stream stopped: %s", stream_sid)
+                # Emit a final summary of the conversation turns
+                logger.info("Call summary (%d turns) for stream %s:", len(conversation), stream_sid)
+                for idx, t in enumerate(conversation, start=1):
+                    logger.info(
+                        "  #%d U: %s | A: %s",
+                        idx,
+                        (t.get("user") or "").strip()[:200],
+                        (t.get("agent") or "").strip()[:200],
+                    )
                 break
     except WebSocketDisconnect:
         logger.info("Twilio stream disconnected: %s", stream_sid)
