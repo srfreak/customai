@@ -17,6 +17,7 @@ from core.auth import RoleChecker
 from core.config import settings
 from shared.exceptions import TelephonyException
 from apps.agents.sales import services
+from apps.agents.sales.agent import SalesAgent, STAGE_SEQUENCE
 import httpx
 import binascii
 from twilio.rest import Client
@@ -35,6 +36,54 @@ if not logger.handlers:
     logger.addHandler(_h)
 logger.setLevel(logging.INFO)
 logger.propagate = True
+
+
+async def _load_sales_agent_for_call(call_sid: str) -> Optional[SalesAgent]:
+    """Build a SalesAgent seeded with the latest strategy for the call's user."""
+    try:
+        calls_collection = get_collection(COLLECTION_CALLS)
+        rec = await calls_collection.find_one({"call_id": call_sid})
+    except Exception:
+        rec = None
+    if not rec:
+        return None
+
+    user_id = rec.get("user_id") or ""
+    agent_id = rec.get("agent_id") or "sales-agent"
+    lead_name = rec.get("lead_name")
+
+    strategy_doc = None
+    if user_id:
+        try:
+            strategy_doc = await services.fetch_latest_strategy(user_id=user_id)
+        except Exception:
+            strategy_doc = None
+    payload = (strategy_doc or {}).get("payload", {})
+    persona = payload.get("persona") or {}
+    agent_name = persona.get("name") or payload.get("title") or "Sales AI Assistant"
+
+    agent = SalesAgent(agent_id=agent_id, user_id=user_id or "unknown", name=agent_name, persona=persona)
+    # Attach strategy context without persisting
+    if payload:
+        agent.attach_strategy(payload)
+        goals = payload.get("goals")
+        if isinstance(goals, list):
+            agent.set_goals(goals)
+    # Group memory by call SID
+    agent.conversation_id = call_sid
+    # Stash convenience attrs for WS loop
+    agent._ws_lead_name = lead_name  # type: ignore[attr-defined]
+    return agent
+
+
+def _next_stage(prev: Optional[str]) -> str:
+    if not prev:
+        return STAGE_SEQUENCE[0]
+    try:
+        idx = STAGE_SEQUENCE.index(prev)
+    except ValueError:
+        return STAGE_SEQUENCE[0]
+    return STAGE_SEQUENCE[min(idx + 1, len(STAGE_SEQUENCE) - 1)]
 
 class CallRequest(BaseModel):
     """Call request model"""
@@ -444,6 +493,9 @@ async def media_stream_endpoint(websocket: WebSocket):
     min_rms = int(settings.CALL_VAD_MIN_RMS)
     verbose = bool(settings.CALL_DEBUG_VERBOSE)
     frames_seen = 0
+    # Agent + stage tracking
+    sales_agent: Optional[SalesAgent] = None
+    current_stage: Optional[str] = None
     in_speech = False
     trailing_silence_ms = 0
 
@@ -461,6 +513,19 @@ async def media_stream_endpoint(websocket: WebSocket):
                 call_sid = stream_info.get("callSid")
                 logger.info("Twilio stream started: %s", stream_sid)
                 print(f"[ws] start | streamSid={stream_sid} callSid={call_sid}")
+                # Load sales agent context for this call
+                try:
+                    sales_agent = await _load_sales_agent_for_call(call_sid)
+                    if sales_agent:
+                        print(
+                            f"[agent] Loaded SalesAgent id={sales_agent.agent_id} user={sales_agent.user_id} voice={sales_agent.voice_id}"
+                        )
+                        current_stage = STAGE_SEQUENCE[0]
+                    else:
+                        print("[agent] No call record found for callSid; falling back to minimal prompt")
+                except Exception as exc:
+                    print("[agent] Failed to load SalesAgent:", exc)
+                    print(traceback.format_exc())
                 if settings.CALL_FIRST_TURN_GREETING:
                     greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
                     greet_in_progress = True
@@ -471,7 +536,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                             websocket=websocket,
                             stream_sid=stream_sid,
                             text=greeting_text,
-                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                            voice_id=(sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None)),
                         )
                     )
                     def _greet_done(_):
@@ -593,13 +658,24 @@ async def media_stream_endpoint(websocket: WebSocket):
                                     print(f"[conv] Caller said: {transcript}")
                                     # Generate reply and speak it
                                     try:
-                                        reply = await services.call_openai_chat(
-                                            [
-                                                {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
-                                                {"role": "user", "content": transcript},
-                                            ],
-                                            model=settings.OPENAI_MODEL,
-                                        )
+                                        if sales_agent:
+                                            stage_for_turn = current_stage or STAGE_SEQUENCE[0]
+                                            gen = await sales_agent.generate_sales_response(
+                                                user_input=transcript,
+                                                stage=stage_for_turn,
+                                                lead_name=getattr(sales_agent, "_ws_lead_name", None),
+                                            )
+                                            reply = gen.get("text", "") or "Thanks for sharing. Could you repeat that?"
+                                            current_stage = _next_stage(stage_for_turn)
+                                        else:
+                                            # Fallback minimal prompt
+                                            reply = await services.call_openai_chat(
+                                                [
+                                                    {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
+                                                    {"role": "user", "content": transcript},
+                                                ],
+                                                model=settings.OPENAI_MODEL,
+                                            )
                                         print(f"[conv] Agent reply: {reply}")
                                     except HTTPException as exc:
                                         logger.error("LLM error: %s", exc.detail)
@@ -618,6 +694,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                                         "call_sid": call_sid,
                                         "user": transcript,
                                         "agent": reply,
+                                        "stage": stage_for_turn if 'stage_for_turn' in locals() else current_stage,
                                     }
                                     conversation.append(turn)
                                     # Persist to calls collection
@@ -644,7 +721,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                                             websocket=websocket,
                                             stream_sid=stream_sid or "",
                                             text=reply,
-                                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                                            voice_id=(sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None)),
                                         )
                                     finally:
                                         speaking_out = False
