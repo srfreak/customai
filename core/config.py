@@ -44,6 +44,7 @@ class Settings:
     TWILIO_PUBLIC_BASE_URL: str = os.getenv("TWILIO_PUBLIC_BASE_URL", "")
     AUDIO_UPLOAD_URL: str = os.getenv("AUDIO_UPLOAD_URL", "")
     TWILIO_STREAM_URL: str = os.getenv("TWILIO_STREAM_URL", "")
+    TWILIO_STREAM_TRACK: str = os.getenv("TWILIO_STREAM_TRACK", "")  # e.g. inbound_track, both_tracks
     SIMULATE_CALL_FLOW: bool = os.getenv("SIMULATE_CALL_FLOW", "false").lower() == "true"
 
     # Public base for building absolute URLs
@@ -55,6 +56,12 @@ class Settings:
 
     # Logging settings
     CALL_LOG_DIR: str = os.getenv("CALL_LOG_DIR", "logs/calls")
+    # Live call / media stream tuning
+    CALL_DEBUG_VERBOSE: bool = os.getenv("CALL_DEBUG_VERBOSE", "false").lower() == "true"
+    CALL_FIRST_TURN_GREETING: bool = os.getenv("CALL_FIRST_TURN_GREETING", "true").lower() == "true"
+    CALL_VAD_MIN_RMS: int = int(os.getenv("CALL_VAD_MIN_RMS", "300"))
+    CALL_SILENCE_THRESHOLD_SEC: float = float(os.getenv("CALL_SILENCE_THRESHOLD_SEC", "0.7"))
+    CALL_MIN_BUFFER_MS: int = int(os.getenv("CALL_MIN_BUFFER_MS", "1500"))
     
     # Zoho CRM settings
     ZOHO_CLIENT_ID: str = os.getenv("ZOHO_CLIENT_ID", "")

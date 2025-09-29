@@ -253,8 +253,12 @@ async def handle_voice_call():
         response = VoiceResponse()
         connect = response.connect()
         stream_url = _resolve_stream_url()
-        # Do not specify track to avoid 31941 errors; defaults to inbound audio
-        connect.stream(url=stream_url)
+        # Default to inbound audio only; omit track to avoid 31941 errors.
+        # If you need both inbound & outbound frames from Twilio, set TWILIO_STREAM_TRACK=both_tracks.
+        if settings.TWILIO_STREAM_TRACK:
+            connect.stream(url=stream_url, track=settings.TWILIO_STREAM_TRACK)
+        else:
+            connect.stream(url=stream_url)
         logger.info("Issued TwiML stream to %s", stream_url)
         return Response(content=str(response), media_type="application/xml")
     except Exception as e:
@@ -401,6 +405,16 @@ async def media_stream_endpoint(websocket: WebSocket):
     processing = False
     # Collect conversational turns for end-of-call summary
     conversation: List[Dict[str, Any]] = []
+    # Gating flags and thresholds
+    greet_in_progress = False
+    speaking_out = False
+    last_media_ts = time.monotonic()
+    # Tuning knobs from environment, with sane defaults
+    silence_threshold = float(settings.CALL_SILENCE_THRESHOLD_SEC)
+    min_buffer_bytes = int(8 * settings.CALL_MIN_BUFFER_MS)  # μ-law @ 8kHz ≈ 8 bytes/ms
+    min_rms = int(settings.CALL_VAD_MIN_RMS)
+    verbose = bool(settings.CALL_DEBUG_VERBOSE)
+    frames_seen = 0
 
     try:
         while True:
@@ -413,19 +427,35 @@ async def media_stream_endpoint(websocket: WebSocket):
                 stream_sid = stream_info.get("streamSid")
                 call_sid = stream_info.get("callSid")
                 logger.info("Twilio stream started: %s", stream_sid)
-                greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
-                greeting_task = asyncio.create_task(
-                    _send_audio_prompt(
-                        websocket=websocket,
-                        stream_sid=stream_sid,
-                        text=greeting_text,
-                        voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                if settings.CALL_FIRST_TURN_GREETING:
+                    greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
+                    greet_in_progress = True
+                    if verbose:
+                        logger.info("Greeting caller with first-turn prompt (%d chars)", len(greeting_text))
+                    greeting_task = asyncio.create_task(
+                        _send_audio_prompt(
+                            websocket=websocket,
+                            stream_sid=stream_sid,
+                            text=greeting_text,
+                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                        )
                     )
-                )
+                    def _greet_done(_):
+                        nonlocal greet_in_progress
+                        greet_in_progress = False
+                        if verbose:
+                            logger.info("Greeting audio completed")
+                    greeting_task.add_done_callback(_greet_done)
+                else:
+                    if verbose:
+                        logger.info("CALL_FIRST_TURN_GREETING disabled; waiting for user speech")
             elif event == "media":
                 media = payload.get("media", {})
                 b64 = media.get("payload")
                 if not b64:
+                    continue
+                trk = media.get("track")
+                if trk and trk != "inbound":
                     continue
                 # Ensure b64 is str, decode to bytes
                 try:
@@ -436,13 +466,26 @@ async def media_stream_endpoint(websocket: WebSocket):
                         continue
                     if not isinstance(decoded, (bytes, bytearray)):
                         continue
-                    inbound_buffer += decoded
+                    frames_seen += 1
+                    if not (greet_in_progress or speaking_out):
+                        inbound_buffer += decoded
+                        last_media_ts = time.monotonic()
+                        if verbose and frames_seen % 50 == 0:
+                            logger.info(
+                                "Inbound frames: %d | buffer=%d bytes",
+                                frames_seen,
+                                len(inbound_buffer),
+                            )
                 except (binascii.Error, ValueError) as exc:
                     # Corrupt frame; skip silently
                     continue
 
                 # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
-                if not processing and len(inbound_buffer) >= 8000:
+                if (
+                    not processing
+                    and len(inbound_buffer) >= min_buffer_bytes
+                    and (time.monotonic() - last_media_ts) >= silence_threshold
+                ):
                     processing = True
                     # Take up to 2 seconds worth to reduce latency
                     take = min(len(inbound_buffer), 16000)
@@ -454,6 +497,21 @@ async def media_stream_endpoint(websocket: WebSocket):
                         if isinstance(chunk, str):
                             # Shouldn't happen, but guard against wrong type
                             chunk = chunk.encode("latin1", errors="ignore")
+                        # Energy gate to avoid junk transcripts from noise
+                        pcm16 = audioop.ulaw2lin(chunk, 2)
+                        energy = audioop.rms(pcm16, 2)
+                        if verbose:
+                            logger.info(
+                                "Gate check | bytes=%d rms=%d silence=%.3fs",
+                                len(chunk),
+                                energy,
+                                time.monotonic() - last_media_ts,
+                            )
+                        if energy < min_rms:
+                            if verbose:
+                                logger.info("Dropped chunk below RMS threshold (%d < %d)", energy, min_rms)
+                            processing = False
+                            continue
                         wav = _mulaw_to_wav(chunk)
                         transcript = await _transcribe_with_openai(wav)
                     except Exception as exc:
@@ -502,14 +560,26 @@ async def media_stream_endpoint(websocket: WebSocket):
                             reply[:160],
                         )
 
-                        await _speak_and_stream(
+                        speaking_out = True
+                        try:
+                            await _speak_and_stream(
                             websocket=websocket,
                             stream_sid=stream_sid or "",
                             text=reply,
                             voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
-                        )
+                            )
+                        finally:
+                            speaking_out = False
 
                     processing = False
+            elif event == "mark":
+                # Twilio will echo marks we send; can be used to end greet_in_progress
+                mark = payload.get("mark", {})
+                name = mark.get("name")
+                if name == "greeting_complete":
+                    greet_in_progress = False
+                    if verbose:
+                        logger.info("Received mark: greeting_complete")
             elif event == "stop":
                 logger.info("Twilio stream stopped: %s", stream_sid)
                 # Emit a final summary of the conversation turns
