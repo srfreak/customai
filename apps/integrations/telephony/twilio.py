@@ -8,7 +8,8 @@ import time
 import io
 import wave
 import audioop
-
+from fastapi.responses import PlainTextResponse
+from fastapi import Request
 from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -22,7 +23,7 @@ import binascii
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
 from core.database import get_collection
-from shared.constants import COLLECTION_CALLS
+from shared.constants import COLLECTION_CALLS 
 from datetime import datetime
 
 router = APIRouter()
@@ -241,28 +242,19 @@ def _resolve_stream_url() -> str:
     return f"{base}/api/v1/integrations/telephony/twilio/stream"
 
 
-@router.post("/voice", include_in_schema=False)
-async def handle_voice_call():
+@router.post("/voice", response_class=PlainTextResponse)
+async def voice_twiml(request: Request):
+    """Return TwiML that tells Twilio to start streaming both legs of the call"""
+    stream_url = settings.TWILIO_STREAM_URL or f"{settings.API_BASE_URL}/api/v1/integrations/telephony/twilio/stream"
+    response = f"""
+    <Response>
+        <Start>
+            <Stream url="{stream_url}" track="both_tracks"/>
+        </Start>
+        <Say>Connecting you to Scriza AI...</Say>
+    </Response>
     """
-    Handle incoming voice call
-    
-    Returns:
-        TwiML response
-    """
-    try:
-        # Create TwiML response
-        response = VoiceResponse()
-        connect = response.connect()
-        stream_url = _resolve_stream_url()
-        # Do not specify track to avoid 31941 errors; defaults to inbound audio
-        connect.stream(url=stream_url)
-        logger.info("Issued TwiML stream to %s", stream_url)
-        return Response(content=str(response), media_type="application/xml")
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to handle voice call: {str(e)}"
-        )
+    return response.strip()
 
 
 def _mp3_to_mulaw_chunks(mp3_b64: str, chunk_ms: int = 20) -> List[str]:
