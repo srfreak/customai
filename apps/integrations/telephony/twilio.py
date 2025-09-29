@@ -8,8 +8,7 @@ import time
 import io
 import wave
 import audioop
-from fastapi.responses import PlainTextResponse
-from fastapi import Request
+
 from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -17,7 +16,6 @@ from core.auth import RoleChecker
 from core.config import settings
 from shared.exceptions import TelephonyException
 from apps.agents.sales import services
-from apps.agents.sales.agent import SalesAgent
 import httpx
 import binascii
 from twilio.rest import Client
@@ -242,19 +240,28 @@ def _resolve_stream_url() -> str:
     return f"{base}/api/v1/integrations/telephony/twilio/stream"
 
 
-@router.post("/voice", response_class=PlainTextResponse)
-async def voice_twiml(request: Request):
-    stream_url = settings.TWILIO_STREAM_URL or f"{settings.API_BASE_URL}/api/v1/integrations/telephony/twilio/stream"
-    response = f"""
-    <Response>
-        <Start>
-            <Stream url="{stream_url}" track="both_tracks"/>
-        </Start>
-        <Say>Connecting you to Scriza AI...</Say>
-        <Pause length="600"/>
-    </Response>
+@router.post("/voice", include_in_schema=False)
+async def handle_voice_call():
     """
-    return response.strip()
+    Handle incoming voice call
+    
+    Returns:
+        TwiML response
+    """
+    try:
+        # Create TwiML response
+        response = VoiceResponse()
+        connect = response.connect()
+        stream_url = _resolve_stream_url()
+        # Do not specify track to avoid 31941 errors; defaults to inbound audio
+        connect.stream(url=stream_url)
+        logger.info("Issued TwiML stream to %s", stream_url)
+        return Response(content=str(response), media_type="application/xml")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to handle voice call: {str(e)}"
+        )
 
 
 def _mp3_to_mulaw_chunks(mp3_b64: str, chunk_ms: int = 20) -> List[str]:
@@ -377,28 +384,9 @@ async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, vo
         logger.error("TTS failed: %s", exc.detail)
         return
     for chunk in chunks:
-        try:
-            await websocket.send_text(
-                json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}})
-            )
-        except Exception:
-            break
-        await asyncio.sleep(0.02)
-
-
-async def _stream_audio_b64(websocket: WebSocket, stream_sid: str, audio_b64: str) -> None:
-    try:
-        chunks = _mp3_to_mulaw_chunks(audio_b64)
-    except TelephonyException as exc:
-        logger.error("Audio conversion failed: %s", exc)
-        return
-    for chunk in chunks:
-        try:
-            await websocket.send_text(
-                json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}})
-            )
-        except Exception:
-            break
+        await websocket.send_text(
+            json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}})
+        )
         await asyncio.sleep(0.02)
 
 
@@ -413,8 +401,6 @@ async def media_stream_endpoint(websocket: WebSocket):
     processing = False
     # Collect conversational turns for end-of-call summary
     conversation: List[Dict[str, Any]] = []
-    sales_agent: Optional[SalesAgent] = None
-    lead_name: Optional[str] = None
 
     try:
         while True:
@@ -427,30 +413,6 @@ async def media_stream_endpoint(websocket: WebSocket):
                 stream_sid = stream_info.get("streamSid")
                 call_sid = stream_info.get("callSid")
                 logger.info("Twilio stream started: %s", stream_sid)
-                # Initialize SalesAgent bound to this call (strategy/persona aware)
-                try:
-                    call_doc = None
-                    if call_sid:
-                        calls_col = get_collection(COLLECTION_CALLS)
-                        call_doc = await calls_col.find_one({"call_id": call_sid})
-                    user_id = (call_doc or {}).get("user_id") or "unknown-user"
-                    agent_id = (call_doc or {}).get("agent_id") or "sales-agent"
-                    lead_name = (call_doc or {}).get("lead_name")
-                    strategy_doc = await services.fetch_latest_strategy(user_id=user_id)
-                    strategy_payload = (strategy_doc or {}).get("payload", {})
-                    persona_payload = strategy_payload.get("persona") or {}
-                    sales_agent = SalesAgent(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        name=persona_payload.get("name") or "Sales Agent",
-                        persona=persona_payload,
-                    )
-                    sales_agent.attach_strategy(strategy_payload)
-                    goals = strategy_payload.get("goals")
-                    if isinstance(goals, list):
-                        sales_agent.set_goals(goals)
-                except Exception as exc:
-                    logger.error("Failed to init SalesAgent for stream %s: %s", stream_sid, exc)
                 greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
                 greeting_task = asyncio.create_task(
                     _send_audio_prompt(
@@ -501,24 +463,16 @@ async def media_stream_endpoint(websocket: WebSocket):
                     if transcript and transcript != last_transcript:
                         last_transcript = transcript
                         logger.info("Caller said: %s", transcript)
-                        # Generate reply via SalesAgent (strategy/persona aware) with fallback
-                        reply = ""
+                        # Generate reply and speak it
                         try:
-                            if sales_agent:
-                                gen = await sales_agent.generate_sales_response(
-                                    user_input=transcript,
-                                    stage=None,
-                                    lead_name=lead_name,
-                                )
-                                reply = gen.get("text", "")
-                            else:
-                                reply = await services.call_openai_chat(
-                                    [
-                                        {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
-                                        {"role": "user", "content": transcript},
-                                    ],
-                                    model=settings.OPENAI_MODEL,
-                                )
+                            # Minimal inline reply using OpenAI chat helper
+                            reply = await services.call_openai_chat(
+                                [
+                                    {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
+                                    {"role": "user", "content": transcript},
+                                ],
+                                model=settings.OPENAI_MODEL,
+                            )
                         except HTTPException as exc:
                             logger.error("LLM error: %s", exc.detail)
                             reply = "Thanks for sharing. Could you repeat that?"
@@ -548,22 +502,12 @@ async def media_stream_endpoint(websocket: WebSocket):
                             reply[:160],
                         )
 
-                        # Speak via SalesAgent (persona voice) when available
-                        try:
-                            if sales_agent:
-                                tts = await sales_agent.speak_response(reply)
-                                audio_b64 = tts.get("audio_base64")
-                                if audio_b64:
-                                    await _stream_audio_b64(websocket, stream_sid or "", audio_b64)
-                            else:
-                                await _speak_and_stream(
-                                    websocket=websocket,
-                                    stream_sid=stream_sid or "",
-                                    text=reply,
-                                    voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
-                                )
-                        except Exception as exc:
-                            logger.error("TTS/stream error: %s", exc)
+                        await _speak_and_stream(
+                            websocket=websocket,
+                            stream_sid=stream_sid or "",
+                            text=reply,
+                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                        )
 
                     processing = False
             elif event == "stop":
