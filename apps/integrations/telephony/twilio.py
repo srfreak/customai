@@ -426,8 +426,8 @@ async def media_stream_endpoint(websocket: WebSocket):
     stream_sid: Optional[str] = None
     greeting_task: Optional[asyncio.Task] = None
     nudge_task: Optional[asyncio.Task] = None
-    # Simple rolling μ-law buffer and last-transcript tracking
-    inbound_buffer = bytearray()
+    # Rolling utterance buffer built by per-frame VAD
+    utterance_buffer = bytearray()
     last_transcript = ""
     processing = False
     # Collect conversational turns for end-of-call summary
@@ -436,13 +436,16 @@ async def media_stream_endpoint(websocket: WebSocket):
     # Gating flags and thresholds
     greet_in_progress = False
     speaking_out = False
-    last_media_ts = time.monotonic()
     # Tuning knobs from environment, with sane defaults
-    silence_threshold = float(settings.CALL_SILENCE_THRESHOLD_SEC)
-    min_buffer_bytes = int(8 * settings.CALL_MIN_BUFFER_MS)  # μ-law @ 8kHz ≈ 8 bytes/ms
+    FRAME_DUR_MS = 20  # Twilio sends 20ms frames by default
+    silence_threshold_ms = int(float(settings.CALL_SILENCE_THRESHOLD_SEC) * 1000)
+    min_utter_ms = int(settings.CALL_MIN_BUFFER_MS)
+    min_utter_bytes = 8 * min_utter_ms  # μ-law @ 8kHz ≈ 8 bytes/ms
     min_rms = int(settings.CALL_VAD_MIN_RMS)
     verbose = bool(settings.CALL_DEBUG_VERBOSE)
     frames_seen = 0
+    in_speech = False
+    trailing_silence_ms = 0
 
     try:
         while True:
@@ -530,23 +533,123 @@ async def media_stream_endpoint(websocket: WebSocket):
                         print(f"[ws.media] Decoded payload is not bytes: {type(decoded)}")
                         continue
                     frames_seen += 1
-                    if not (greet_in_progress or speaking_out):
-                        inbound_buffer += decoded
-                        last_media_ts = time.monotonic()
-                        if frames_seen % 10 == 0:
-                            print(f"[ws.media] buffer={len(inbound_buffer)} bytes (frames={frames_seen})")
+                    # Per-frame VAD based on RMS energy; Twilio continuously sends frames,
+                    # so we detect end-of-utterance by trailing silence duration, not gaps in frames.
+                    if greet_in_progress or speaking_out:
                         if verbose and frames_seen % 50 == 0:
                             logger.info(
-                                "Inbound frames: %d | buffer=%d bytes",
-                                frames_seen,
-                                len(inbound_buffer),
+                                "Inbound frames received but gated (greet_in_progress=%s speaking_out=%s)",
+                                greet_in_progress,
+                                speaking_out,
                             )
-                    elif verbose and frames_seen % 50 == 0:
-                        logger.info(
-                            "Inbound frames received but gated (greet_in_progress=%s speaking_out=%s)",
-                            greet_in_progress,
-                            speaking_out,
-                        )
+                        continue
+
+                    pcm16f = audioop.ulaw2lin(decoded, 2)
+                    energy = audioop.rms(pcm16f, 2)
+                    if frames_seen % 25 == 0:
+                        print(f"[vad.frame] rms={energy} in_speech={in_speech} trail_sil={trailing_silence_ms}ms buf={len(utterance_buffer)} bytes")
+
+                    if energy >= min_rms:
+                        # Active speech
+                        utterance_buffer += decoded
+                        if not in_speech:
+                            in_speech = True
+                        trailing_silence_ms = 0
+                    else:
+                        # Silence frame
+                        if in_speech:
+                            trailing_silence_ms += FRAME_DUR_MS
+                            # include short trailing silence to avoid truncation
+                            if trailing_silence_ms <= silence_threshold_ms:
+                                utterance_buffer += decoded
+
+                            if (
+                                not processing
+                                and trailing_silence_ms >= silence_threshold_ms
+                                and len(utterance_buffer) >= min_utter_bytes
+                            ):
+                                print(f"[vad] Utterance end | len={len(utterance_buffer)} bytes, trailing_silence={trailing_silence_ms}ms")
+                                processing = True
+                                chunk = bytes(utterance_buffer)
+                                utterance_buffer.clear()
+                                in_speech = False
+                                trailing_silence_ms = 0
+
+                                # Decode μ-law to WAV and transcribe
+                                try:
+                                    wav = _mulaw_to_wav(chunk)
+                                    print(f"[vad] Built WAV: {len(wav)} bytes; sending to ASR…")
+                                    transcript = await _transcribe_with_openai(wav)
+                                except Exception as exc:
+                                    logger.error("Transcription error: %s", exc)
+                                    print("[asr] Transcription error:", exc)
+                                    print(traceback.format_exc())
+                                    transcript = ""
+
+                                if transcript and transcript != last_transcript:
+                                    last_transcript = transcript
+                                    last_user_activity = time.monotonic()
+                                    logger.info("Caller said: %s", transcript)
+                                    print(f"[conv] Caller said: {transcript}")
+                                    # Generate reply and speak it
+                                    try:
+                                        reply = await services.call_openai_chat(
+                                            [
+                                                {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
+                                                {"role": "user", "content": transcript},
+                                            ],
+                                            model=settings.OPENAI_MODEL,
+                                        )
+                                        print(f"[conv] Agent reply: {reply}")
+                                    except HTTPException as exc:
+                                        logger.error("LLM error: %s", exc.detail)
+                                        print("[conv] LLM HTTPException:", exc.detail)
+                                        print(traceback.format_exc())
+                                        reply = "Thanks for sharing. Could you repeat that?"
+                                    except Exception as exc:
+                                        print("[conv] Unexpected LLM error:", exc)
+                                        print(traceback.format_exc())
+                                        reply = "Sorry, I missed that. Could you say it again?"
+
+                                    # Log and store this turn
+                                    turn = {
+                                        "ts": time.time(),
+                                        "stream_sid": stream_sid,
+                                        "call_sid": call_sid,
+                                        "user": transcript,
+                                        "agent": reply,
+                                    }
+                                    conversation.append(turn)
+                                    # Persist to calls collection
+                                    try:
+                                        if call_sid:
+                                            res = await get_collection(COLLECTION_CALLS).update_one(
+                                                {"call_id": call_sid},
+                                                {"$push": {"conversation": turn}, "$set": {"updated_at": datetime.utcnow()}},
+                                            )
+                                            print(f"[db] Updated call record turns: matched={res.matched_count} modified={res.modified_count}")
+                                    except Exception as exc:
+                                        print("[db] Failed to append conversation turn:", exc)
+                                        print(traceback.format_exc())
+                                    logger.info(
+                                        "Turn %d | User: %s | Agent: %s",
+                                        len(conversation),
+                                        transcript[:160],
+                                        reply[:160],
+                                    )
+
+                                    speaking_out = True
+                                    try:
+                                        await _speak_and_stream(
+                                            websocket=websocket,
+                                            stream_sid=stream_sid or "",
+                                            text=reply,
+                                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                                        )
+                                    finally:
+                                        speaking_out = False
+
+                                processing = False
                 except (binascii.Error, ValueError) as exc:
                     if verbose:
                         logger.info("Base64 decode error on media frame: %s", exc)
@@ -554,117 +657,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                     print(traceback.format_exc())
                     continue
 
-                # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
-                if (
-                    not processing
-                    and len(inbound_buffer) >= min_buffer_bytes
-                    and (time.monotonic() - last_media_ts) >= silence_threshold
-                ):
-                    print(
-                        f"[vad] Trigger: buffer={len(inbound_buffer)} >= {min_buffer_bytes}, silence={time.monotonic()-last_media_ts:.3f}s >= {silence_threshold}s"
-                    )
-                    processing = True
-                    # Take up to 2 seconds worth to reduce latency
-                    take = min(len(inbound_buffer), 16000)
-                    chunk = bytes(inbound_buffer[:take])
-                    del inbound_buffer[:take]
-                    print(f"[vad] Took {take} bytes for ASR; remaining buffer={len(inbound_buffer)}")
-
-                    # Decode μ-law to WAV and transcribe
-                    try:
-                        if isinstance(chunk, str):
-                            # Shouldn't happen, but guard against wrong type
-                            chunk = chunk.encode("latin1", errors="ignore")
-                        # Energy gate to avoid junk transcripts from noise
-                        pcm16 = audioop.ulaw2lin(chunk, 2)
-                        energy = audioop.rms(pcm16, 2)
-                        print(f"[vad] Energy RMS={energy} (min={min_rms})")
-                        if verbose:
-                            logger.info(
-                                "Gate check | bytes=%d rms=%d silence=%.3fs",
-                                len(chunk),
-                                energy,
-                                time.monotonic() - last_media_ts,
-                            )
-                        if energy < min_rms:
-                            if verbose:
-                                logger.info("Dropped chunk below RMS threshold (%d < %d)", energy, min_rms)
-                            print(f"[vad] Dropping below RMS threshold: {energy} < {min_rms}")
-                            processing = False
-                            continue
-                        wav = _mulaw_to_wav(chunk)
-                        print(f"[vad] Built WAV: {len(wav)} bytes; sending to ASR…")
-                        transcript = await _transcribe_with_openai(wav)
-                    except Exception as exc:
-                        logger.error("Transcription error: %s", exc)
-                        print("[asr] Transcription error:", exc)
-                        print(traceback.format_exc())
-                        transcript = ""
-
-                    if transcript and transcript != last_transcript:
-                        last_transcript = transcript
-                        last_user_activity = time.monotonic()
-                        logger.info("Caller said: %s", transcript)
-                        print(f"[conv] Caller said: {transcript}")
-                        # Generate reply and speak it
-                        try:
-                            # Minimal inline reply using OpenAI chat helper
-                            reply = await services.call_openai_chat(
-                                [
-                                    {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
-                                    {"role": "user", "content": transcript},
-                                ],
-                                model=settings.OPENAI_MODEL,
-                            )
-                        except HTTPException as exc:
-                            logger.error("LLM error: %s", exc.detail)
-                            print("[conv] LLM HTTPException:", exc.detail)
-                            print(traceback.format_exc())
-                            reply = "Thanks for sharing. Could you repeat that?"
-                        except Exception as exc:
-                            print("[conv] Unexpected LLM error:", exc)
-                            print(traceback.format_exc())
-                            reply = "Sorry, I missed that. Could you say it again?"
-
-                        # Log and store this turn
-                        turn = {
-                            "ts": time.time(),
-                            "stream_sid": stream_sid,
-                            "call_sid": call_sid,
-                            "user": transcript,
-                            "agent": reply,
-                        }
-                        conversation.append(turn)
-                        # Persist to calls collection
-                        try:
-                            if call_sid:
-                                res = await get_collection(COLLECTION_CALLS).update_one(
-                                    {"call_id": call_sid},
-                                    {"$push": {"conversation": turn}, "$set": {"updated_at": datetime.utcnow()}},
-                                )
-                                print(f"[db] Updated call record turns: matched={res.matched_count} modified={res.modified_count}")
-                        except Exception as exc:
-                            print("[db] Failed to append conversation turn:", exc)
-                            print(traceback.format_exc())
-                        logger.info(
-                            "Turn %d | User: %s | Agent: %s",
-                            len(conversation),
-                            transcript[:160],
-                            reply[:160],
-                        )
-
-                        speaking_out = True
-                        try:
-                            await _speak_and_stream(
-                            websocket=websocket,
-                            stream_sid=stream_sid or "",
-                            text=reply,
-                            voice_id=settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
-                            )
-                        finally:
-                            speaking_out = False
-
-                    processing = False
+                # Utterance end and processing handled in per-frame VAD above
             elif event == "mark":
                 # Twilio will echo marks we send; can be used to end greet_in_progress
                 mark = payload.get("mark", {})
