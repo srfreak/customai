@@ -399,12 +399,14 @@ async def media_stream_endpoint(websocket: WebSocket):
     await websocket.accept()
     stream_sid: Optional[str] = None
     greeting_task: Optional[asyncio.Task] = None
+    nudge_task: Optional[asyncio.Task] = None
     # Simple rolling μ-law buffer and last-transcript tracking
     inbound_buffer = bytearray()
     last_transcript = ""
     processing = False
     # Collect conversational turns for end-of-call summary
     conversation: List[Dict[str, Any]] = []
+    last_user_activity = time.monotonic()
     # Gating flags and thresholds
     greet_in_progress = False
     speaking_out = False
@@ -444,7 +446,26 @@ async def media_stream_endpoint(websocket: WebSocket):
                         nonlocal greet_in_progress
                         greet_in_progress = False
                         if verbose:
-                            logger.info("Greeting audio completed")
+                            logger.info("Greeting audio completed; ready to receive caller input…")
+                        # Optionally schedule a nudge if caller remains silent
+                        if settings.CALL_NUDGE_AFTER_SEC > 0 and nudge_task is None:
+                            async def _run_nudge():
+                                await asyncio.sleep(settings.CALL_NUDGE_AFTER_SEC)
+                                if (
+                                    len(conversation) == 0
+                                    and not greet_in_progress
+                                    and not speaking_out
+                                ):
+                                    if verbose:
+                                        logger.info("No user input detected; sending nudge prompt")
+                                    await _speak_and_stream(
+                                        websocket,
+                                        stream_sid or "",
+                                        "Hello? I’m here. How can I help you today?",
+                                        settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                                    )
+                            nonlocal nudge_task
+                            nudge_task = asyncio.create_task(_run_nudge())
                     greeting_task.add_done_callback(_greet_done)
                 else:
                     if verbose:
@@ -455,7 +476,10 @@ async def media_stream_endpoint(websocket: WebSocket):
                 if not b64:
                     continue
                 trk = media.get("track")
-                if trk and trk != "inbound":
+                # Accept both Twilio variants for inbound
+                if trk and trk not in ("inbound", "inbound_track"):
+                    if verbose and trk:
+                        logger.info("Skipping non-inbound media track: %s", trk)
                     continue
                 # Ensure b64 is str, decode to bytes
                 try:
@@ -476,8 +500,15 @@ async def media_stream_endpoint(websocket: WebSocket):
                                 frames_seen,
                                 len(inbound_buffer),
                             )
+                    elif verbose and frames_seen % 50 == 0:
+                        logger.info(
+                            "Inbound frames received but gated (greet_in_progress=%s speaking_out=%s)",
+                            greet_in_progress,
+                            speaking_out,
+                        )
                 except (binascii.Error, ValueError) as exc:
-                    # Corrupt frame; skip silently
+                    if verbose:
+                        logger.info("Base64 decode error on media frame: %s", exc)
                     continue
 
                 # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
@@ -520,6 +551,7 @@ async def media_stream_endpoint(websocket: WebSocket):
 
                     if transcript and transcript != last_transcript:
                         last_transcript = transcript
+                        last_user_activity = time.monotonic()
                         logger.info("Caller said: %s", transcript)
                         # Generate reply and speak it
                         try:
@@ -579,7 +611,24 @@ async def media_stream_endpoint(websocket: WebSocket):
                 if name == "greeting_complete":
                     greet_in_progress = False
                     if verbose:
-                        logger.info("Received mark: greeting_complete")
+                        logger.info("Received mark: greeting_complete; ready to receive caller input…")
+                    if settings.CALL_NUDGE_AFTER_SEC > 0 and nudge_task is None:
+                        async def _run_nudge():
+                            await asyncio.sleep(settings.CALL_NUDGE_AFTER_SEC)
+                            if (
+                                len(conversation) == 0
+                                and not greet_in_progress
+                                and not speaking_out
+                            ):
+                                if verbose:
+                                    logger.info("No user input detected; sending nudge prompt")
+                                await _speak_and_stream(
+                                    websocket,
+                                    stream_sid or "",
+                                    "Hello? I’m here. How can I help you today?",
+                                    settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
+                                )
+                        nudge_task = asyncio.create_task(_run_nudge())
             elif event == "stop":
                 logger.info("Twilio stream stopped: %s", stream_sid)
                 # Emit a final summary of the conversation turns
@@ -606,6 +655,8 @@ async def media_stream_endpoint(websocket: WebSocket):
     finally:
         if greeting_task:
             greeting_task.cancel()
+        if nudge_task:
+            nudge_task.cancel()
         await websocket.close()
 
 
