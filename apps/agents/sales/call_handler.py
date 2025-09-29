@@ -197,8 +197,22 @@ async def start_call(
         "Extracted key phrases",
         extra={"phrases": key_phrases, "count": len(key_phrases)},
     )
-    status_label = CALL_STATUS_COMPLETED if call_status != CALL_STATUS_FAILED else CALL_STATUS_FAILED
-    lead_status = "hung_up" if call_status == CALL_STATUS_FAILED else "interested"
+    # Normalize initial status: queued/ringing/in-progress => in_progress, completed => completed, failure set accordingly
+    def _normalize_status(s: Optional[str]) -> str:
+        if not s:
+            return CALL_STATUS_IN_PROGRESS
+        s = s.lower()
+        if s in {"queued", "ringing", "in-progress", "in_progress"}:
+            return CALL_STATUS_IN_PROGRESS
+        if s in {"completed"}:
+            return CALL_STATUS_COMPLETED
+        if s in {"busy", "canceled", "failed", "no-answer", "no_answer"}:
+            return CALL_STATUS_FAILED
+        return CALL_STATUS_IN_PROGRESS
+
+    status_label = _normalize_status(call_status)
+    # Do not infer interest at start; will be updated later by WS handler
+    lead_status = "hung_up" if status_label == CALL_STATUS_FAILED else "pending"
     if call_status == CALL_STATUS_FAILED and not failure_reason:
         failure_reason = "Unknown error"
     if voice_failures and not failure_reason:

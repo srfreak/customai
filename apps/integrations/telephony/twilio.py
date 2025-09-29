@@ -20,10 +20,20 @@ import httpx
 import binascii
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
+from core.database import get_collection
+from shared.constants import COLLECTION_CALLS
+from datetime import datetime
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+# Ensure conversation logs appear in container logs even if root logger is WARNING
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
+logger.propagate = True
 
 class CallRequest(BaseModel):
     """Call request model"""
@@ -401,6 +411,7 @@ async def media_stream_endpoint(websocket: WebSocket):
             if event == "start":
                 stream_info = payload.get("start", {})
                 stream_sid = stream_info.get("streamSid")
+                call_sid = stream_info.get("callSid")
                 logger.info("Twilio stream started: %s", stream_sid)
                 greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
                 greeting_task = asyncio.create_task(
@@ -470,10 +481,20 @@ async def media_stream_endpoint(websocket: WebSocket):
                         turn = {
                             "ts": time.time(),
                             "stream_sid": stream_sid,
+                            "call_sid": call_sid,
                             "user": transcript,
                             "agent": reply,
                         }
                         conversation.append(turn)
+                        # Persist to calls collection
+                        try:
+                            if call_sid:
+                                await get_collection(COLLECTION_CALLS).update_one(
+                                    {"call_id": call_sid},
+                                    {"$push": {"conversation": turn}, "$set": {"updated_at": datetime.utcnow()}},
+                                )
+                        except Exception:
+                            pass
                         logger.info(
                             "Turn %d | User: %s | Agent: %s",
                             len(conversation),
@@ -500,6 +521,15 @@ async def media_stream_endpoint(websocket: WebSocket):
                         (t.get("user") or "").strip()[:200],
                         (t.get("agent") or "").strip()[:200],
                     )
+                # Mark call completed in DB
+                try:
+                    if 'call_sid' in locals() and call_sid:
+                        await get_collection(COLLECTION_CALLS).update_one(
+                            {"call_id": call_sid},
+                            {"$set": {"status": "completed", "updated_at": datetime.utcnow()}},
+                        )
+                except Exception:
+                    pass
                 break
     except WebSocketDisconnect:
         logger.info("Twilio stream disconnected: %s", stream_sid)
