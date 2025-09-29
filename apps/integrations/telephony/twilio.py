@@ -8,6 +8,7 @@ import time
 import io
 import wave
 import audioop
+import traceback
 
 from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -260,8 +261,11 @@ async def handle_voice_call():
         else:
             connect.stream(url=stream_url)
         logger.info("Issued TwiML stream to %s", stream_url)
+        print(f"[twilio.voice] Issued TwiML stream to {stream_url}")
         return Response(content=str(response), media_type="application/xml")
     except Exception as e:
+        print("[twilio.voice] Exception while building TwiML:", e)
+        print(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to handle voice call: {str(e)}"
@@ -315,14 +319,19 @@ async def _send_audio_prompt(websocket: WebSocket, stream_sid: str, text: str, v
         voice_payload = await services.synthesise_elevenlabs_voice(text=text, voice_id=voice_id)
     except HTTPException as exc:
         logger.error("Failed to synthesise greeting: %s", exc.detail)
+        print("[send_audio_prompt] TTS HTTPException:", exc.detail)
+        print(traceback.format_exc())
         return
 
     try:
         chunks = _mp3_to_mulaw_chunks(voice_payload["audio_base64"])
     except TelephonyException as exc:
         logger.error("Audio conversion failed: %s", exc)
+        print("[send_audio_prompt] Audio conversion failed:", exc)
+        print(traceback.format_exc())
         return
 
+    print(f"[send_audio_prompt] Streaming greeting: {len(text)} chars, {len(chunks)} chunks, streamSid={stream_sid}")
     for chunk in chunks:
         await websocket.send_text(
             json.dumps(
@@ -370,13 +379,21 @@ async def _transcribe_with_openai(wav_bytes: bytes) -> str:
     data = {
         "model": "whisper-1",
     }
+    print(f"[asr] Posting {len(wav_bytes)} bytes to Whisper")
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception:
+            print("[asr] Whisper HTTP error:", resp.status_code, resp.text[:500])
+            print(traceback.format_exc())
+            raise
         data = resp.json()
-        return data.get("text", "").strip()
+        text = data.get("text", "").strip()
+        print(f"[asr] Whisper response: '{text}'")
+        return text
 
 
 async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, voice_id: Optional[str]) -> None:
@@ -386,7 +403,14 @@ async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, vo
         chunks = _mp3_to_mulaw_chunks(tts["audio_base64"])
     except HTTPException as exc:
         logger.error("TTS failed: %s", exc.detail)
+        print("[tts] ElevenLabs HTTPException:", exc.detail)
+        print(traceback.format_exc())
         return
+    except Exception as exc:
+        print("[tts] Unexpected error during TTS or conversion:", exc)
+        print(traceback.format_exc())
+        return
+    print(f"[tts] Streaming reply: {len(text)} chars, {len(chunks)} chunks, streamSid={stream_sid}")
     for chunk in chunks:
         await websocket.send_text(
             json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}})
@@ -396,7 +420,9 @@ async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, vo
 
 @router.websocket("/stream")
 async def media_stream_endpoint(websocket: WebSocket):
+    print("[ws] Accepting websocket…")
     await websocket.accept()
+    print("[ws] Websocket accepted")
     stream_sid: Optional[str] = None
     greeting_task: Optional[asyncio.Task] = None
     nudge_task: Optional[asyncio.Task] = None
@@ -421,14 +447,17 @@ async def media_stream_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
+            print(f"[ws] Received frame: {len(data)} chars")
             payload = json.loads(data)
             event = payload.get("event")
+            print(f"[ws] Event: {event}")
 
             if event == "start":
                 stream_info = payload.get("start", {})
                 stream_sid = stream_info.get("streamSid")
                 call_sid = stream_info.get("callSid")
                 logger.info("Twilio stream started: %s", stream_sid)
+                print(f"[ws] start | streamSid={stream_sid} callSid={call_sid}")
                 if settings.CALL_FIRST_TURN_GREETING:
                     greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
                     greet_in_progress = True
@@ -448,6 +477,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                         greet_in_progress = False
                         if verbose:
                             logger.info("Greeting audio completed; ready to receive caller input…")
+                        print("[ws] Greeting complete; ready for input")
                         # Optionally schedule a nudge if caller remains silent
                         if settings.CALL_NUDGE_AFTER_SEC > 0 and nudge_task is None:
                             async def _run_nudge():
@@ -473,13 +503,20 @@ async def media_stream_endpoint(websocket: WebSocket):
             elif event == "media":
                 media = payload.get("media", {})
                 b64 = media.get("payload")
-                if not b64:
-                    continue
                 trk = media.get("track")
+                try:
+                    b64_len = len(b64) if isinstance(b64, str) else 0
+                except Exception:
+                    b64_len = 0
+                print(f"[ws.media] track={trk} payload_len={b64_len}")
+                if not b64:
+                    print("[ws.media] Missing payload; skipping")
+                    continue
                 # Accept both Twilio variants for inbound
                 if trk and trk not in ("inbound", "inbound_track"):
                     if verbose and trk:
                         logger.info("Skipping non-inbound media track: %s", trk)
+                    print(f"[ws.media] Skipping non-inbound track: {trk}")
                     continue
                 # Ensure b64 is str, decode to bytes
                 try:
@@ -487,13 +524,17 @@ async def media_stream_endpoint(websocket: WebSocket):
                         decoded = base64.b64decode(b64, validate=False)
                     else:
                         # Unexpected type; skip
+                        print(f"[ws.media] Unexpected payload type: {type(b64)}")
                         continue
                     if not isinstance(decoded, (bytes, bytearray)):
+                        print(f"[ws.media] Decoded payload is not bytes: {type(decoded)}")
                         continue
                     frames_seen += 1
                     if not (greet_in_progress or speaking_out):
                         inbound_buffer += decoded
                         last_media_ts = time.monotonic()
+                        if frames_seen % 10 == 0:
+                            print(f"[ws.media] buffer={len(inbound_buffer)} bytes (frames={frames_seen})")
                         if verbose and frames_seen % 50 == 0:
                             logger.info(
                                 "Inbound frames: %d | buffer=%d bytes",
@@ -509,6 +550,8 @@ async def media_stream_endpoint(websocket: WebSocket):
                 except (binascii.Error, ValueError) as exc:
                     if verbose:
                         logger.info("Base64 decode error on media frame: %s", exc)
+                    print("[ws.media] Base64 decode error:", exc)
+                    print(traceback.format_exc())
                     continue
 
                 # If we have ~1s of audio (8000 bytes) and not already processing, transcribe
@@ -517,11 +560,15 @@ async def media_stream_endpoint(websocket: WebSocket):
                     and len(inbound_buffer) >= min_buffer_bytes
                     and (time.monotonic() - last_media_ts) >= silence_threshold
                 ):
+                    print(
+                        f"[vad] Trigger: buffer={len(inbound_buffer)} >= {min_buffer_bytes}, silence={time.monotonic()-last_media_ts:.3f}s >= {silence_threshold}s"
+                    )
                     processing = True
                     # Take up to 2 seconds worth to reduce latency
                     take = min(len(inbound_buffer), 16000)
                     chunk = bytes(inbound_buffer[:take])
                     del inbound_buffer[:take]
+                    print(f"[vad] Took {take} bytes for ASR; remaining buffer={len(inbound_buffer)}")
 
                     # Decode μ-law to WAV and transcribe
                     try:
@@ -531,6 +578,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                         # Energy gate to avoid junk transcripts from noise
                         pcm16 = audioop.ulaw2lin(chunk, 2)
                         energy = audioop.rms(pcm16, 2)
+                        print(f"[vad] Energy RMS={energy} (min={min_rms})")
                         if verbose:
                             logger.info(
                                 "Gate check | bytes=%d rms=%d silence=%.3fs",
@@ -541,18 +589,23 @@ async def media_stream_endpoint(websocket: WebSocket):
                         if energy < min_rms:
                             if verbose:
                                 logger.info("Dropped chunk below RMS threshold (%d < %d)", energy, min_rms)
+                            print(f"[vad] Dropping below RMS threshold: {energy} < {min_rms}")
                             processing = False
                             continue
                         wav = _mulaw_to_wav(chunk)
+                        print(f"[vad] Built WAV: {len(wav)} bytes; sending to ASR…")
                         transcript = await _transcribe_with_openai(wav)
                     except Exception as exc:
                         logger.error("Transcription error: %s", exc)
+                        print("[asr] Transcription error:", exc)
+                        print(traceback.format_exc())
                         transcript = ""
 
                     if transcript and transcript != last_transcript:
                         last_transcript = transcript
                         last_user_activity = time.monotonic()
                         logger.info("Caller said: %s", transcript)
+                        print(f"[conv] Caller said: {transcript}")
                         # Generate reply and speak it
                         try:
                             # Minimal inline reply using OpenAI chat helper
@@ -565,7 +618,13 @@ async def media_stream_endpoint(websocket: WebSocket):
                             )
                         except HTTPException as exc:
                             logger.error("LLM error: %s", exc.detail)
+                            print("[conv] LLM HTTPException:", exc.detail)
+                            print(traceback.format_exc())
                             reply = "Thanks for sharing. Could you repeat that?"
+                        except Exception as exc:
+                            print("[conv] Unexpected LLM error:", exc)
+                            print(traceback.format_exc())
+                            reply = "Sorry, I missed that. Could you say it again?"
 
                         # Log and store this turn
                         turn = {
@@ -579,12 +638,14 @@ async def media_stream_endpoint(websocket: WebSocket):
                         # Persist to calls collection
                         try:
                             if call_sid:
-                                await get_collection(COLLECTION_CALLS).update_one(
+                                res = await get_collection(COLLECTION_CALLS).update_one(
                                     {"call_id": call_sid},
                                     {"$push": {"conversation": turn}, "$set": {"updated_at": datetime.utcnow()}},
                                 )
-                        except Exception:
-                            pass
+                                print(f"[db] Updated call record turns: matched={res.matched_count} modified={res.modified_count}")
+                        except Exception as exc:
+                            print("[db] Failed to append conversation turn:", exc)
+                            print(traceback.format_exc())
                         logger.info(
                             "Turn %d | User: %s | Agent: %s",
                             len(conversation),
@@ -612,6 +673,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                     greet_in_progress = False
                     if verbose:
                         logger.info("Received mark: greeting_complete; ready to receive caller input…")
+                    print("[ws] mark=greeting_complete; ready for input")
                     if settings.CALL_NUDGE_AFTER_SEC > 0 and nudge_task is None:
                         async def _run_nudge():
                             await asyncio.sleep(settings.CALL_NUDGE_AFTER_SEC)
@@ -631,6 +693,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                         nudge_task = asyncio.create_task(_run_nudge())
             elif event == "stop":
                 logger.info("Twilio stream stopped: %s", stream_sid)
+                print(f"[ws] stop | streamSid={stream_sid}")
                 # Emit a final summary of the conversation turns
                 logger.info("Call summary (%d turns) for stream %s:", len(conversation), stream_sid)
                 for idx, t in enumerate(conversation, start=1):
@@ -643,20 +706,24 @@ async def media_stream_endpoint(websocket: WebSocket):
                 # Mark call completed in DB
                 try:
                     if 'call_sid' in locals() and call_sid:
-                        await get_collection(COLLECTION_CALLS).update_one(
+                        res = await get_collection(COLLECTION_CALLS).update_one(
                             {"call_id": call_sid},
                             {"$set": {"status": "completed", "updated_at": datetime.utcnow()}},
                         )
-                except Exception:
-                    pass
+                        print(f"[db] Marked call completed: matched={res.matched_count} modified={res.modified_count}")
+                except Exception as exc:
+                    print("[db] Failed to mark call completed:", exc)
+                    print(traceback.format_exc())
                 break
     except WebSocketDisconnect:
         logger.info("Twilio stream disconnected: %s", stream_sid)
+        print(f"[ws] disconnected | streamSid={stream_sid}")
     finally:
         if greeting_task:
             greeting_task.cancel()
         if nudge_task:
             nudge_task.cancel()
+        print("[ws] closing websocket")
         await websocket.close()
 
 
