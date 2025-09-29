@@ -17,25 +17,35 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Free runner disk space
-        run: |
-          docker system prune -af || true
-          docker builder prune -af || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-      - name: Log in to GitHub Container Registry
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build image
-        run: docker build -f docker/Dockerfile -t $IMAGE_NAME:${{ github.sha }} .
-      - name: Push image
-        run: |
-          docker push $IMAGE_NAME:${{ github.sha }}
-          docker tag $IMAGE_NAME:${{ github.sha }} $IMAGE_NAME:latest
-          docker push $IMAGE_NAME:latest
+
+      - name: Build and push image with cache
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache
 
   deploy:
     name: Deploy to AlmaLinux host
@@ -45,13 +55,16 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+
       - name: Add SSH key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
       - name: Add host key
         run: ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
-      - name: Deploy via SSH
+
+      - name: Deploy and restart container
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -60,12 +73,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
-          ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "docker login ghcr.io -u \"${GITHUB_ACTOR}\" -p \"${GITHUB_TOKEN}\" && \
-             docker system prune -af || true && docker builder prune -af || true && \
-             docker pull ${IMAGE_NAME}:${IMAGE_TAG} && \
-             cd /srv/customai && \
-             docker compose -f docker-compose.prod.yml pull && \
-             docker compose -f docker-compose.prod.yml \
-               up -d --force-recreate --pull always && \
-             docker image prune -af || true"
+          ssh "${DEPLOY_USER}@${DEPLOY_HOST}" <<EOF
+            docker login ghcr.io -u "${GITHUB_ACTOR}" -p "${GITHUB_TOKEN}"
+            docker pull ${IMAGE_NAME}:${IMAGE_TAG}
+            docker stop customai || true && docker rm customai || true
+            docker run -d --name customai -p 80:80 ${IMAGE_NAME}:${IMAGE_TAG}
+            docker image prune -af || true
+          EOF
