@@ -444,6 +444,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                     )
                     def _greet_done(_):
                         nonlocal greet_in_progress
+                        nonlocal nudge_task
                         greet_in_progress = False
                         if verbose:
                             logger.info("Greeting audio completed; ready to receive caller input…")
@@ -464,7 +465,6 @@ async def media_stream_endpoint(websocket: WebSocket):
                                         "Hello? I’m here. How can I help you today?",
                                         settings.ELEVENLABS_DEFAULT_VOICE_ID or None,
                                     )
-                            nonlocal nudge_task
                             nudge_task = asyncio.create_task(_run_nudge())
                     greeting_task.add_done_callback(_greet_done)
                 else:
