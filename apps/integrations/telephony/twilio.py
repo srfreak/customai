@@ -23,7 +23,7 @@ import binascii
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
 from core.database import get_collection
-from shared.constants import COLLECTION_CALLS 
+from shared.constants import COLLECTION_CALLS
 from datetime import datetime
 
 router = APIRouter()
@@ -244,7 +244,6 @@ def _resolve_stream_url() -> str:
 
 @router.post("/voice", response_class=PlainTextResponse)
 async def voice_twiml(request: Request):
-    """Return TwiML that tells Twilio to start streaming both legs of the call"""
     stream_url = settings.TWILIO_STREAM_URL or f"{settings.API_BASE_URL}/api/v1/integrations/telephony/twilio/stream"
     response = f"""
     <Response>
@@ -252,6 +251,7 @@ async def voice_twiml(request: Request):
             <Stream url="{stream_url}" track="both_tracks"/>
         </Start>
         <Say>Connecting you to Scriza AI...</Say>
+        <Pause length="600"/>
     </Response>
     """
     return response.strip()
