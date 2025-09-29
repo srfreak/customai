@@ -467,6 +467,7 @@ async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, vo
         await asyncio.sleep(0.02)
 
 
+
 @router.websocket("/stream")
 async def media_stream_endpoint(websocket: WebSocket):
     print("[ws] Accepting websocket…")
