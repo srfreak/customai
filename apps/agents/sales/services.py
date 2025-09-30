@@ -50,7 +50,7 @@ async def call_openai_chat(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     *,
-    stream: bool = False,
+    stream: bool = True,
     persona: Optional[Dict[str, Any]] = None,
     goals: Optional[Sequence[str]] = None,
     temperature: float = 0.7,

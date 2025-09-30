@@ -25,6 +25,7 @@ from twilio.twiml.voice_response import VoiceResponse
 from core.database import get_collection
 from shared.constants import COLLECTION_CALLS
 from datetime import datetime
+import websockets
 
 router = APIRouter()
 
@@ -446,7 +447,17 @@ async def _transcribe_with_openai(wav_bytes: bytes) -> str:
 
 
 async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, voice_id: Optional[str]) -> None:
-    """TTS via ElevenLabs and stream μ-law frames back to Twilio."""
+    """Speak via ElevenLabs; prefer WS low-latency streaming, fallback to HTTP MP3 if needed."""
+    if settings.ELEVENLABS_USE_WS_TTS:
+        try:
+            await _speak_and_stream_ws(websocket, stream_sid, text, voice_id)
+            return
+        except Exception as exc:
+            logger.warning("WS TTS failed; falling back to HTTP: %s", exc)
+            print("[tts.ws] Error:", exc)
+            print(traceback.format_exc())
+            # Fall through to HTTP
+
     try:
         tts = await services.synthesise_elevenlabs_voice(text=text, voice_id=voice_id)
         chunks = _mp3_to_mulaw_chunks(tts["audio_base64"])
@@ -459,12 +470,149 @@ async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, vo
         print("[tts] Unexpected error during TTS or conversion:", exc)
         print(traceback.format_exc())
         return
-    print(f"[tts] Streaming reply: {len(text)} chars, {len(chunks)} chunks, streamSid={stream_sid}")
+    print(f"[tts] Streaming reply (HTTP): {len(text)} chars, {len(chunks)} chunks, streamSid={stream_sid}")
     for chunk in chunks:
         await websocket.send_text(
             json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}})
         )
         await asyncio.sleep(0.02)
+
+
+def _ulaw_to_twilio_chunks(ulaw_bytes: bytes, chunk_ms: int = 20) -> List[str]:
+    frame_size = int(8000 * chunk_ms / 1000)  # 160 bytes at 8 kHz
+    out: List[str] = []
+    for i in range(0, len(ulaw_bytes), frame_size):
+        frame = ulaw_bytes[i : i + frame_size]
+        if len(frame) == frame_size:
+            out.append(base64.b64encode(frame).decode())
+    return out
+
+
+async def _speak_and_stream_ws(websocket: WebSocket, stream_sid: str, text: str, voice_id: Optional[str]) -> None:
+    """Low-latency ElevenLabs WebSocket TTS piped directly to Twilio as μ-law frames."""
+    if not settings.ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=503, detail="ElevenLabs API key not configured")
+    voice = voice_id or settings.ELEVENLABS_DEFAULT_VOICE_ID
+    if not voice:
+        raise HTTPException(status_code=422, detail="ElevenLabs voice_id is required for WS TTS")
+
+    # Build WS URL
+    ws_url = settings.ELEVENLABS_WS_URL.format(voice_id=voice)
+    query = {
+        "model_id": settings.ELEVENLABS_MODEL or "eleven_monolingual_v1",
+        "optimize_streaming_latency": str(settings.ELEVENLABS_WS_OPTIMIZE_LATENCY),
+        "output_format": settings.ELEVENLABS_WS_OUTPUT_FORMAT,
+    }
+    qs = "&".join(f"{k}={v}" for k, v in query.items())
+    if "?" in ws_url:
+        url = f"{ws_url}&{qs}"
+    else:
+        url = f"{ws_url}?{qs}"
+
+    headers = [("xi-api-key", settings.ELEVENLABS_API_KEY)]
+    # Reconnect basics
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"[tts.ws] Connecting to ElevenLabs WS (attempt {attempt+1})")
+            async with websockets.connect(
+                url,
+                extra_headers=headers,
+                open_timeout=10,
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=None,
+            ) as elws:
+                # Initial settings message
+                init = {
+                    "text": "",
+                    "voice_settings": {
+                        "stability": settings.ELEVENLABS_WS_STABILITY,
+                        "similarity_boost": settings.ELEVENLABS_WS_SIMILARITY,
+                    },
+                }
+                await elws.send(json.dumps(init))
+
+                # Send the text and trigger generation
+                await elws.send(
+                    json.dumps({
+                        "text": text,
+                        "try_trigger_generation": True,
+                    })
+                )
+
+                # Receive audio chunks and stream to Twilio
+                finished = False
+                ulaw_buf = bytearray()
+                async for raw in elws:
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    if "audio" in data and data["audio"]:
+                        try:
+                            audio_bytes = base64.b64decode(data["audio"], validate=False)
+                        except Exception:
+                            continue
+                        # If we requested ulaw_8000, this should already be μ-law 8k
+                        if settings.ELEVENLABS_WS_OUTPUT_FORMAT.startswith("ulaw") or settings.ELEVENLABS_WS_OUTPUT_FORMAT.startswith("mulaw"):
+                            ulaw_buf.extend(audio_bytes)
+                        else:
+                            # Fallback: assume 16-bit PCM at 22050 or 16000; resample to 8000 and μ-law encode
+                            # Default to 16000 if unknown
+                            src_rate = 16000
+                            try:
+                                # Heuristic: if length divisible by 2*22050*0.02≈882, assume 22050
+                                if len(audio_bytes) % 882 == 0:
+                                    src_rate = 22050
+                            except Exception:
+                                pass
+                            try:
+                                pcm16 = audio_bytes
+                                pcm8k, _ = audioop.ratecv(pcm16, 2, 1, src_rate, 8000, None)
+                                ulaw_bytes = audioop.lin2ulaw(pcm8k, 2)
+                                ulaw_buf.extend(ulaw_bytes)
+                            except Exception:
+                                # As a last resort, skip problematic chunk
+                                continue
+
+                        # Flush μ-law frames in 20ms slices to Twilio
+                        frames = _ulaw_to_twilio_chunks(bytes(ulaw_buf))
+                        # Keep only remainder (if any)
+                        keep = len(ulaw_buf) % 160
+                        if len(frames) > 0:
+                            flush_bytes = len(frames) * 160
+                            # Send frames
+                            for payload in frames:
+                                await websocket.send_text(
+                                    json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": payload}})
+                                )
+                                await asyncio.sleep(0.02)
+                            # Trim buffer
+                            if flush_bytes > 0:
+                                ulaw_buf = bytearray(ulaw_buf[flush_bytes:])
+                        # Ensure remainder is preserved (sanity)
+                        if keep and len(ulaw_buf) != keep:
+                            ulaw_buf = bytearray(ulaw_buf[-keep:])
+
+                    if data.get("isFinal"):
+                        finished = True
+                        break
+
+                if not finished:
+                    # Ensure any tail frames are flushed
+                    if ulaw_buf:
+                        for payload in _ulaw_to_twilio_chunks(bytes(ulaw_buf)):
+                            await websocket.send_text(
+                                json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": payload}})
+                            )
+                            await asyncio.sleep(0.02)
+                    await asyncio.sleep(0)  # yield
+                return
+        except Exception as exc:
+            if attempt >= max_retries:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
 
 
 
@@ -503,10 +651,10 @@ async def media_stream_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            print(f"[ws] Received frame: {len(data)} chars")
+            
             payload = json.loads(data)
             event = payload.get("event")
-            print(f"[ws] Event: {event}")
+            
 
             if event == "start":
                 stream_info = payload.get("start", {})
@@ -577,15 +725,13 @@ async def media_stream_endpoint(websocket: WebSocket):
                     b64_len = len(b64) if isinstance(b64, str) else 0
                 except Exception:
                     b64_len = 0
-                print(f"[ws.media] track={trk} payload_len={b64_len}")
-                if not b64:
-                    print("[ws.media] Missing payload; skipping")
-                    continue
+                
+                
                 # Accept both Twilio variants for inbound
                 if trk and trk not in ("inbound", "inbound_track"):
                     if verbose and trk:
                         logger.info("Skipping non-inbound media track: %s", trk)
-                    print(f"[ws.media] Skipping non-inbound track: {trk}")
+                   
                     continue
                 # Ensure b64 is str, decode to bytes
                 try:
@@ -593,11 +739,9 @@ async def media_stream_endpoint(websocket: WebSocket):
                         decoded = base64.b64decode(b64, validate=False)
                     else:
                         # Unexpected type; skip
-                        print(f"[ws.media] Unexpected payload type: {type(b64)}")
+                       
                         continue
-                    if not isinstance(decoded, (bytes, bytearray)):
-                        print(f"[ws.media] Decoded payload is not bytes: {type(decoded)}")
-                        continue
+                    
                     frames_seen += 1
                     # Per-frame VAD based on RMS energy; Twilio continuously sends frames,
                     # so we detect end-of-utterance by trailing silence duration, not gaps in frames.

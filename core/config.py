@@ -32,6 +32,15 @@ class Settings:
     ELEVENLABS_BASE_URL: str = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")
     ELEVENLABS_DEFAULT_VOICE_ID: str = os.getenv("ELEVENLABS_DEFAULT_VOICE_ID", "")
     ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_monolingual_v1")
+    ELEVENLABS_USE_WS_TTS: bool = os.getenv("ELEVENLABS_USE_WS_TTS", "false").lower() == "true"
+    ELEVENLABS_WS_URL: str = os.getenv(
+        "ELEVENLABS_WS_URL",
+        "wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input",
+    )
+    ELEVENLABS_WS_OUTPUT_FORMAT: str = os.getenv("ELEVENLABS_WS_OUTPUT_FORMAT", "ulaw_8000")
+    ELEVENLABS_WS_OPTIMIZE_LATENCY: int = int(os.getenv("ELEVENLABS_WS_OPTIMIZE_LATENCY", "3"))
+    ELEVENLABS_WS_STABILITY: float = float(os.getenv("ELEVENLABS_WS_STABILITY", "0.4"))
+    ELEVENLABS_WS_SIMILARITY: float = float(os.getenv("ELEVENLABS_WS_SIMILARITY", "0.8"))
     
     # Twilio settings
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
