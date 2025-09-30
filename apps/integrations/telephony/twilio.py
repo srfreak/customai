@@ -59,7 +59,9 @@ async def _load_sales_agent_for_call(call_sid: str) -> Optional[SalesAgent]:
             strategy_doc = await services.fetch_latest_strategy(user_id=user_id)
         except Exception:
             strategy_doc = None
-    payload = (strategy_doc or {}).get("payload", {})
+    user_payload = (strategy_doc or {}).get("payload", {})
+    # Merge global core skills with user strategy (user overrides)
+    payload = services.merge_core_and_user_strategy(user_payload or {})
     persona = payload.get("persona") or {}
     agent_name = persona.get("name") or payload.get("title") or "Sales AI Assistant"
 
@@ -70,6 +72,11 @@ async def _load_sales_agent_for_call(call_sid: str) -> Optional[SalesAgent]:
         goals = payload.get("goals")
         if isinstance(goals, list):
             agent.set_goals(goals)
+        # Ensure objections are available for fast path
+        try:
+            agent.objection_map = payload.get("objections", {}) or {}
+        except Exception:
+            pass
     # Group memory by call SID
     agent.conversation_id = call_sid
     # Stash convenience attrs for WS loop
