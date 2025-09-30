@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
+from pathlib import Path
 
 import httpx
 from fastapi import HTTPException, status
@@ -33,6 +34,102 @@ _STRATEGY_FIELDS_PRIORITY: Sequence[str] = (
     "objections",
     "closing",
 )
+
+# Core prompts/assets directory (bundled in repo)
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+
+def _read_json_file(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def load_core_sales_strategy() -> Dict[str, Any]:
+    """Load core, reusable sales skills (common across tenants)."""
+    return _read_json_file(_PROMPTS_DIR / "strategy.json")
+
+
+def load_core_objections_map() -> Dict[str, str]:
+    data = _read_json_file(_PROMPTS_DIR / "objections_map.json")
+    return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _merge_dict(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow dict merge with b overriding a, recursively for nested dicts."""
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge_dict(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _merge_list(a: Optional[Sequence[Any]], b: Optional[Sequence[Any]]) -> List[Any]:
+    out: List[Any] = []
+    seen = set()
+    for src in (a or []), (b or []):
+        for item in src:
+            key = json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else str(item)
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+    return out
+
+
+def merge_core_and_user_strategy(user_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Layer core sales skills (global) with user-specific business strategy (tenant-scoped).
+
+    Rules:
+    - persona: user overrides core fields
+    - scripts: user values take precedence; lists/dicts merged; strings prefer user if provided
+    - objections (top-level): core + user (user overrides)
+    - goals: union
+    - products, fallback_scenarios: user if provided; else core
+    """
+    core = load_core_sales_strategy() or {}
+    core_scripts = core.get("scripts") or {}
+    user_scripts = user_payload.get("scripts") or {}
+
+    merged_scripts: Dict[str, Any] = {}
+    # Strings
+    for key in ("greeting", "pitch"):
+        val = user_scripts.get(key) or core_scripts.get(key)
+        if val:
+            merged_scripts[key] = val
+    # Lists
+    for key in ("faqs", "closing"):
+        merged_scripts[key] = _merge_list(core_scripts.get(key), user_scripts.get(key))
+    # Dict inside scripts (e.g., objections snippet)
+    if isinstance(core_scripts.get("objections"), dict) or isinstance(user_scripts.get("objections"), dict):
+        merged_scripts["objections"] = _merge_dict(core_scripts.get("objections") or {}, user_scripts.get("objections") or {})
+
+    # Persona
+    merged_persona = _merge_dict(core.get("persona") or {}, user_payload.get("persona") or {})
+
+    # Goals
+    merged_goals = _merge_list(core.get("goals"), user_payload.get("goals"))
+
+    # Top-level objections
+    merged_objections = _merge_dict(load_core_objections_map(), _merge_dict(core.get("objections") or {}, user_payload.get("objections") or {}))
+
+    merged = dict(core)
+    # Overlay user specifics
+    merged.update(user_payload or {})
+    # Force merged components
+    merged["persona"] = merged_persona
+    merged["scripts"] = merged_scripts
+    if merged_goals:
+        merged["goals"] = merged_goals
+    if merged_objections:
+        merged["objections"] = merged_objections
+    # products, fallback_scenarios: user overrides already applied by merged.update(user_payload)
+    return merged
 
 
 async def fetch_latest_strategy(user_id: str) -> Optional[Dict[str, Any]]:
@@ -201,12 +298,14 @@ async def _invoke_callback(callback: TokenCallback, token: str) -> None:
 
 
 async def generate_strategy_context(strategy_payload: Dict[str, Any]) -> str:
-    """Flatten relevant strategy sections into a prompt-friendly string."""
+    """Flatten relevant strategy sections into a prompt-friendly string (core + user)."""
+    merged = merge_core_and_user_strategy(strategy_payload or {})
     lines: List[str] = []
-    scripts = strategy_payload.get("scripts") or {}
+    scripts = merged.get("scripts") or {}
 
+    # Scripts summary
     for field in _STRATEGY_FIELDS_PRIORITY:
-        value = strategy_payload.get(field) or scripts.get(field)
+        value = merged.get(field) or scripts.get(field)
         if not value:
             continue
         if isinstance(value, (list, tuple)):
@@ -217,6 +316,34 @@ async def generate_strategy_context(strategy_payload: Dict[str, Any]) -> str:
             lines.append(f"{field.title()}: {pairs}")
         else:
             lines.append(f"{field.title()}: {value}")
+
+    # Products summary
+    prods = merged.get("product_details") or merged.get("products") or []
+    if isinstance(prods, list) and prods:
+        try:
+            sample = prods[0]
+            name = sample.get("name")
+            value = sample.get("value") or sample.get("benefits")
+            if name:
+                lines.append(f"Product: {name}")
+            if value:
+                if isinstance(value, list):
+                    lines.append("Benefits: " + "; ".join(map(str, value)))
+                else:
+                    lines.append(f"Value: {value}")
+        except Exception:
+            pass
+
+    # Audience / business info
+    audience = merged.get("target_audience") or {}
+    if isinstance(audience, dict):
+        pains = audience.get("pain_points")
+        if pains:
+            pains_str = ", ".join(map(str, pains)) if isinstance(pains, list) else str(pains)
+            lines.append(f"Audience Pain Points: {pains_str}")
+    biz = merged.get("business_info") or {}
+    if isinstance(biz, dict) and biz.get("company_name"):
+        lines.append(f"Company: {biz.get('company_name')} — {biz.get('tagline') or ''}")
 
     if not lines:
         lines.append("Use general sales best practices.")
