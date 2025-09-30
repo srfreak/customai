@@ -72,6 +72,8 @@ class Settings:
     CALL_SILENCE_THRESHOLD_SEC: float = float(os.getenv("CALL_SILENCE_THRESHOLD_SEC", "0.7"))
     CALL_MIN_BUFFER_MS: int = int(os.getenv("CALL_MIN_BUFFER_MS", "1500"))
     CALL_NUDGE_AFTER_SEC: float = float(os.getenv("CALL_NUDGE_AFTER_SEC", "0"))  # 0 disables
+    CALL_BARGE_IN_ENABLED: bool = os.getenv("CALL_BARGE_IN_ENABLED", "true").lower() == "true"
+    CALL_BARGE_IN_RMS: int = int(os.getenv("CALL_BARGE_IN_RMS", "450"))
     
     # Zoho CRM settings
     ZOHO_CLIENT_ID: str = os.getenv("ZOHO_CLIENT_ID", "")

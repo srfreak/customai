@@ -622,6 +622,138 @@ async def _speak_and_stream_ws(websocket: WebSocket, stream_sid: str, text: str,
             await asyncio.sleep(0.5 * (attempt + 1))
 
 
+class ElevenLabsStreamer:
+    """Persistent ElevenLabs WS session per call with cancel/barge-in support."""
+
+    def __init__(self, voice_id: str, twilio_ws: WebSocket, stream_sid: str):
+        self.voice_id = voice_id
+        self.twilio_ws = twilio_ws
+        self.stream_sid = stream_sid
+        self._conn: Optional[websockets.WebSocketClientProtocol] = None
+        self._connected = False
+        self._stop_event = asyncio.Event()
+        self._init_sent = False
+
+    async def connect(self):
+        if self._connected:
+            return
+        ws_url = settings.ELEVENLABS_WS_URL.format(voice_id=self.voice_id)
+        query = {
+            "model_id": settings.ELEVENLABS_MODEL or "eleven_monolingual_v1",
+            "optimize_streaming_latency": str(settings.ELEVENLABS_WS_OPTIMIZE_LATENCY),
+            "output_format": settings.ELEVENLABS_WS_OUTPUT_FORMAT,
+        }
+        qs = "&".join(f"{k}={v}" for k, v in query.items())
+        if "?" in ws_url:
+            url = f"{ws_url}&{qs}"
+        else:
+            url = f"{ws_url}?{qs}"
+        headers = [("xi-api-key", settings.ELEVENLABS_API_KEY)]
+        print(f"[tts.ws] Persistent connect: {url}")
+        self._conn = await websockets.connect(
+            url,
+            extra_headers=headers,
+            open_timeout=10,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=None,
+        )
+        self._connected = True
+        self._stop_event.clear()
+        self._init_sent = False
+
+    async def close(self):
+        if self._conn:
+            try:
+                await self._conn.close()
+            except Exception:
+                pass
+        self._conn = None
+        self._connected = False
+        self._stop_event.set()
+        self._init_sent = False
+
+    async def cancel(self):
+        """Interrupt current generation (used for barge-in)."""
+        print("[tts.ws] Cancel requested")
+        self._stop_event.set()
+        # Close to hard-stop audio generation; will reconnect on next speak
+        await self.close()
+
+    async def speak_text(self, text: str):
+        if not settings.ELEVENLABS_API_KEY:
+            raise HTTPException(status_code=503, detail="ElevenLabs API key not configured")
+        if not self.voice_id:
+            raise HTTPException(status_code=422, detail="ElevenLabs voice_id is required for WS TTS")
+        if not self._connected or not self._conn:
+            await self.connect()
+        assert self._conn is not None
+        # Send init once per connection
+        if not self._init_sent:
+            init = {
+                "text": "",
+                "voice_settings": {
+                    "stability": settings.ELEVENLABS_WS_STABILITY,
+                    "similarity_boost": settings.ELEVENLABS_WS_SIMILARITY,
+                },
+            }
+            await self._conn.send(json.dumps(init))
+            self._init_sent = True
+        # Trigger generation
+        await self._conn.send(json.dumps({"text": text, "try_trigger_generation": True}))
+        print(f"[tts.ws] Speaking {len(text)} chars")
+
+        ulaw_buf = bytearray()
+        try:
+            async for raw in self._conn:
+                if self._stop_event.is_set():
+                    print("[tts.ws] Stop flagged; breaking audio loop")
+                    break
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if data.get("audio"):
+                    try:
+                        audio_bytes = base64.b64decode(data["audio"], validate=False)
+                    except Exception:
+                        continue
+                    if settings.ELEVENLABS_WS_OUTPUT_FORMAT.startswith("ulaw") or settings.ELEVENLABS_WS_OUTPUT_FORMAT.startswith("mulaw"):
+                        ulaw_buf.extend(audio_bytes)
+                    else:
+                        # Conservative fallback
+                        src_rate = 16000
+                        try:
+                            if len(audio_bytes) % 882 == 0:
+                                src_rate = 22050
+                        except Exception:
+                            pass
+                        try:
+                            pcm16 = audio_bytes
+                            pcm8k, _ = audioop.ratecv(pcm16, 2, 1, src_rate, 8000, None)
+                            ulaw_bytes = audioop.lin2ulaw(pcm8k, 2)
+                            ulaw_buf.extend(ulaw_bytes)
+                        except Exception:
+                            continue
+                    # Flush 20ms frames to Twilio
+                    frames = _ulaw_to_twilio_chunks(bytes(ulaw_buf))
+                    flush_bytes = len(frames) * 160
+                    for payload in frames:
+                        await self.twilio_ws.send_text(json.dumps({"event": "media", "streamSid": self.stream_sid, "media": {"payload": payload}}))
+                        await asyncio.sleep(0.02)
+                    if flush_bytes:
+                        ulaw_buf = bytearray(ulaw_buf[flush_bytes:])
+                if data.get("isFinal"):
+                    break
+        except websockets.ConnectionClosed:
+            print("[tts.ws] Connection closed during speak; will reconnect on next use")
+            await self.close()
+        except Exception as exc:
+            print("[tts.ws] Error in speak_text:", exc)
+            print(traceback.format_exc())
+            await self.close()
+
+
 
 @router.websocket("/stream")
 async def media_stream_endpoint(websocket: WebSocket):
@@ -652,6 +784,7 @@ async def media_stream_endpoint(websocket: WebSocket):
     # Agent + stage tracking
     sales_agent: Optional[SalesAgent] = None
     current_stage: Optional[str] = None
+    tts_session: Optional[ElevenLabsStreamer] = None
     in_speech = False
     trailing_silence_ms = 0
 
@@ -687,14 +820,20 @@ async def media_stream_endpoint(websocket: WebSocket):
                     greet_in_progress = True
                     if verbose:
                         logger.info("Greeting caller with first-turn prompt (%d chars)", len(greeting_text))
-                    greeting_task = asyncio.create_task(
-                        _send_audio_prompt(
-                            websocket=websocket,
-                            stream_sid=stream_sid,
-                            text=greeting_text,
-                            voice_id=(sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None)),
+                    # If WS TTS enabled, use persistent session for greeting too
+                    greet_voice = (sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None))
+                    if settings.ELEVENLABS_USE_WS_TTS and greet_voice:
+                        tts_session = ElevenLabsStreamer(greet_voice, websocket, stream_sid)
+                        greeting_task = asyncio.create_task(tts_session.speak_text(greeting_text))
+                    else:
+                        greeting_task = asyncio.create_task(
+                            _send_audio_prompt(
+                                websocket=websocket,
+                                stream_sid=stream_sid,
+                                text=greeting_text,
+                                voice_id=greet_voice,
+                            )
                         )
-                    )
                     def _greet_done(_):
                         nonlocal greet_in_progress
                         nonlocal nudge_task
@@ -763,6 +902,15 @@ async def media_stream_endpoint(websocket: WebSocket):
 
                     pcm16f = audioop.ulaw2lin(decoded, 2)
                     energy = audioop.rms(pcm16f, 2)
+                    # Barge-in: if caller speaks loudly while bot is speaking, cancel TTS immediately
+                    if settings.CALL_BARGE_IN_ENABLED and speaking_out and energy >= int(settings.CALL_BARGE_IN_RMS):
+                        print(f"[barge-in] energy={energy} >= {settings.CALL_BARGE_IN_RMS}; cancelling TTS")
+                        try:
+                            if tts_session:
+                                await tts_session.cancel()
+                        except Exception:
+                            pass
+                        speaking_out = False
                     if frames_seen % 25 == 0:
                         print(f"[vad.frame] rms={energy} in_speech={in_speech} trail_sil={trailing_silence_ms}ms buf={len(utterance_buffer)} bytes")
 
@@ -869,12 +1017,18 @@ async def media_stream_endpoint(websocket: WebSocket):
 
                                     speaking_out = True
                                     try:
-                                        await _speak_and_stream(
-                                            websocket=websocket,
-                                            stream_sid=stream_sid or "",
-                                            text=reply,
-                                            voice_id=(sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None)),
-                                        )
+                                        use_voice = (sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None))
+                                        if settings.ELEVENLABS_USE_WS_TTS and use_voice:
+                                            if not tts_session:
+                                                tts_session = ElevenLabsStreamer(use_voice, websocket, stream_sid or "")
+                                            await tts_session.speak_text(reply)
+                                        else:
+                                            await _speak_and_stream(
+                                                websocket=websocket,
+                                                stream_sid=stream_sid or "",
+                                                text=reply,
+                                                voice_id=use_voice,
+                                            )
                                     finally:
                                         speaking_out = False
 
@@ -945,6 +1099,8 @@ async def media_stream_endpoint(websocket: WebSocket):
             greeting_task.cancel()
         if nudge_task:
             nudge_task.cancel()
+        if tts_session:
+            await tts_session.close()
         print("[ws] closing websocket")
         await websocket.close()
 
