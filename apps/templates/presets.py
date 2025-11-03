@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from core.auth import RoleChecker
 from shared.presets import find_preset, load_presets, upsert_preset, delete_preset
+from core.config import settings
 from core.database import get_collection
 from shared.constants import COLLECTION_AGENT_TEMPLATES
 from datetime import datetime
@@ -21,8 +22,25 @@ async def get_preset(
     user: Optional[dict] = Depends(RoleChecker(["user", "admin"]))
 ) -> Dict[str, Any]:
     preset = find_preset(industry, use_case)
+    source = "preset"
     if not preset:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preset not found")
+        # Build a gentle default instead of returning 404 to keep UX smooth
+        persona_name = "Scrappy Agent"
+        tone = "friendly, helpful"
+        voice_id = getattr(settings, "ELEVENLABS_DEFAULT_VOICE_ID", "") or None
+        locale = getattr(settings, "DEFAULT_PERSONA_LOCALE", "en")
+        goal_key = use_case.strip().lower().replace(" ", "_") if use_case else "assist"
+        preset = {
+            "persona": {
+                "name": persona_name,
+                "tone": tone,
+                "voice_id": voice_id,
+                "locale": locale,
+            },
+            "greeting": f"Hi, this is {persona_name}.",
+            "goals": [goal_key],
+        }
+        source = "default"
 
     # Log usage for analytics if collection exists
     try:
@@ -39,7 +57,7 @@ async def get_preset(
         # Non-fatal
         pass
 
-    return {"industry": industry, "use_case": use_case, "preset": preset}
+    return {"industry": industry, "use_case": use_case, "preset": preset, "source": source}
 
 
 @router.get("/templates/presets")

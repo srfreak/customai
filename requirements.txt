@@ -1,7 +1,7 @@
 fastapi==0.68.0
 uvicorn[standard]==0.15.0
 motor==2.5.1
-pydantic==1.8.2
+pydantic==1.10.13
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.5
@@ -11,3 +11,6 @@ openpyxl==3.1.2
 python-dotenv==1.0.1
 passlib[argon2]
 argon2-cffi
+beautifulsoup4==4.12.3
+openai==1.59.3
+redis==5.0.8

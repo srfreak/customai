@@ -1,6 +1,9 @@
-from fastapi import FastAPI, Depends, status
+from fastapi import FastAPI, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import uvicorn
 from core.config import settings
 from core.auth import verify_token, RoleChecker
@@ -15,6 +18,8 @@ from apps.users.endpoints import router as user_router
 from apps.admin_panel.user_management import router as admin_user_router
 from apps.memory.memory_manager import router as memory_router
 from apps.integrations.telephony.twilio import router as twilio_router
+from apps.ops import router as ops_router
+from apps.templates.presets import router as presets_router
 
 app = FastAPI(
     title="Scriza AI Platform",
@@ -33,6 +38,8 @@ app.add_middleware(
 
 # Add security
 security = HTTPBearer()
+templates = Jinja2Templates(directory="templates")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Add event handlers for MongoDB
 app.add_event_handler("startup", connect_to_mongo)
@@ -93,6 +100,17 @@ app.include_router(
     tags=["telephony"]
 )
 
+app.include_router(
+    ops_router,
+    tags=["ops"],
+)
+
+app.include_router(
+    presets_router,
+    prefix="/api/v1",
+    tags=["templates"],
+)
+
 @app.get("/health", status_code=status.HTTP_200_OK)
 async def health_check():
     """Health check endpoint"""
@@ -102,6 +120,24 @@ async def health_check():
 async def root():
     """Root endpoint"""
     return {"message": "Welcome to Scriza AI Platform"}
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def user_login_page(request: Request):
+    """Render the end-user login helper template."""
+    return templates.TemplateResponse("login.html", {"request": request})
+
+
+@app.get("/admin/login", response_class=HTMLResponse)
+async def admin_login_page(request: Request):
+    """Render the admin login helper template."""
+    return templates.TemplateResponse("admin_login.html", {"request": request})
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Render the unified dashboard shell (auth handled client-side)."""
+    return templates.TemplateResponse("dashboard.html", {"request": request})
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

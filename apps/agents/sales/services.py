@@ -362,17 +362,17 @@ async def synthesise_elevenlabs_voice(
                 except Exception:
                     pass
         except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-        message = exc.response.text or exc.response.reason_phrase
-        if status_code == 404:
-            detail = (
-                f"ElevenLabs voice '{voice_id}' not found. Use a valid voice_id or update ELEVENLABS_DEFAULT_VOICE_ID."
-            )
-        elif status_code == 401:
-            detail = "ElevenLabs authentication failed. Check ELEVENLABS_API_KEY."
-        else:
-            detail = f"ElevenLabs request failed ({status_code}): {message}"
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+            status_code = exc.response.status_code
+            message = exc.response.text or exc.response.reason_phrase
+            if status_code == 404:
+                detail = (
+                    f"ElevenLabs voice '{voice_id}' not found. Use a valid voice_id or update ELEVENLABS_DEFAULT_VOICE_ID."
+                )
+            elif status_code == 401:
+                detail = "ElevenLabs authentication failed. Check ELEVENLABS_API_KEY."
+            else:
+                detail = f"ElevenLabs request failed ({status_code}): {message}"
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
     duration = max(len(text.split()) * 0.4, 1.0)
