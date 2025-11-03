@@ -26,6 +26,12 @@ class Settings:
     
     # CORS settings
     ALLOWED_ORIGINS: List[str] = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+
+    # Persona / translation settings
+    DEFAULT_PERSONA_LOCALE: str = os.getenv("DEFAULT_PERSONA_LOCALE", "en")
+    TRANSLATION_BACKEND: str = os.getenv("TRANSLATION_BACKEND", "passthrough")
+    NLLB_MODEL: str = os.getenv("NLLB_MODEL", "facebook/nllb-200-distilled-600M")
+    BHASHINI_API_KEY: str = os.getenv("BHASHINI_API_KEY", "")
     
     # ElevenLabs settings
     ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
@@ -41,6 +47,13 @@ class Settings:
     ELEVENLABS_WS_OPTIMIZE_LATENCY: int = int(os.getenv("ELEVENLABS_WS_OPTIMIZE_LATENCY", "3"))
     ELEVENLABS_WS_STABILITY: float = float(os.getenv("ELEVENLABS_WS_STABILITY", "0.4"))
     ELEVENLABS_WS_SIMILARITY: float = float(os.getenv("ELEVENLABS_WS_SIMILARITY", "0.8"))
+
+    # ASR settings
+    ASR_BACKEND: str = os.getenv("ASR_BACKEND", "faster-whisper")
+    ASR_MODEL_PATH: str = os.getenv("ASR_MODEL_PATH", "")
+    ASR_MIN_RMS: int = int(os.getenv("ASR_MIN_RMS", "350"))
+    ASR_MIN_UTTERANCE_MS: int = int(os.getenv("ASR_MIN_UTTERANCE_MS", "1200"))
+    ASR_MAX_SILENCE_MS: int = int(os.getenv("ASR_MAX_SILENCE_MS", "600"))
     
     # Twilio settings
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -61,7 +74,16 @@ class Settings:
 
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    # Backward compatibility default
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+    # Model switching
+    OPENAI_MODEL_CRITICAL: str = os.getenv("OPENAI_MODEL_CRITICAL", "gpt-4o")
+    OPENAI_MODEL_CHEAP: str = os.getenv("OPENAI_MODEL_CHEAP", "gpt-4o-mini")
+
+    # Caching controls
+    LLM_CACHE_TTL_SECONDS: int = int(os.getenv("LLM_CACHE_TTL_SECONDS", "30"))
+    TTS_CACHE_ENABLED: bool = os.getenv("TTS_CACHE_ENABLED", "true").lower() == "true"
+    TTS_CACHE_DIR: str = os.getenv("TTS_CACHE_DIR", "static/voice_cache")
 
     # Logging settings
     CALL_LOG_DIR: str = os.getenv("CALL_LOG_DIR", "logs/calls")

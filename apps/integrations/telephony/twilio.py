@@ -5,8 +5,6 @@ import logging
 import subprocess
 from typing import Optional, Dict, Any, List
 import time
-import io
-import wave
 import audioop
 import traceback
 
@@ -18,7 +16,8 @@ from core.config import settings
 from shared.exceptions import TelephonyException
 from apps.agents.sales import services
 from apps.agents.sales.agent import SalesAgent, STAGE_SEQUENCE
-import httpx
+from apps.agents.transcriber import StreamingTranscriber, TranscriberConfig, TranscriptionChunk
+from apps.ops.live_calls import live_calls
 import binascii
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
@@ -92,6 +91,74 @@ def _next_stage(prev: Optional[str]) -> str:
     except ValueError:
         return STAGE_SEQUENCE[0]
     return STAGE_SEQUENCE[min(idx + 1, len(STAGE_SEQUENCE) - 1)]
+
+
+def _normalize_confidence(raw: Optional[float]) -> Optional[float]:
+    if raw is None:
+        return None
+    # faster-whisper returns log probs (-1..0); convert to 0..1 range
+    if raw <= 0:
+        return max(0.0, min(1.0, (raw + 1.0) / 2.0))
+    return max(0.0, min(1.0, raw))
+
+
+def _evaluate_fallbacks(policies: Optional[List[Dict[str, Any]]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    triggered: List[Dict[str, Any]] = []
+    if not policies:
+        return triggered
+    confidence = context.get("confidence")
+    for policy in policies:
+        trigger = (policy.get("trigger") or "").lower()
+        if trigger == "confidence_below_0.5":
+            threshold = float(policy.get("threshold", 0.5))
+            if confidence is not None and confidence < threshold:
+                triggered.append(policy)
+        elif trigger == "no_response" and context.get("no_response"):
+            triggered.append(policy)
+        elif trigger == "tts_error" and context.get("tts_error"):
+            triggered.append(policy)
+        elif trigger == "asr_timeout" and context.get("asr_timeout"):
+            triggered.append(policy)
+    return triggered
+
+
+async def _stream_silence(websocket: WebSocket, stream_sid: str, duration: float = 1.0) -> None:
+    frames = max(1, int(duration / 0.02))
+    silent_payload = base64.b64encode(b"\xff" * 160).decode()
+    for _ in range(frames):
+        await websocket.send_text(
+            json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": silent_payload}})
+        )
+        await asyncio.sleep(0.02)
+
+
+async def _log_fallback_event(
+    agent: Optional[SalesAgent],
+    call_id: Optional[str],
+    reason: str,
+    action: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    timestamp = datetime.utcnow()
+    payload = {
+        "event_type": "fallback_triggered",
+        "reason": reason,
+        "action": action,
+        "call_id": call_id,
+        "timestamp": timestamp.isoformat(),
+        "agent_state": "awaiting_resume",
+        "details": extra or {},
+    }
+    if call_id:
+        calls_collection = get_collection(COLLECTION_CALLS)
+        await calls_collection.update_one(
+            {"call_id": call_id},
+            {"$push": {"fallback_events": payload}, "$set": {"updated_at": timestamp}},
+            upsert=True,
+        )
+        await live_calls.update_call(call_id, {"last_fallback": payload})
+    if agent:
+        await agent._log_agent_event("fallback_triggered", payload)
 
 class CallRequest(BaseModel):
     """Call request model"""
@@ -412,48 +479,26 @@ async def _send_audio_prompt(websocket: WebSocket, stream_sid: str, text: str, v
     )
 
 
-def _mulaw_to_wav(mulaw_bytes: bytes) -> bytes:
-    """Decode raw 8kHz μ-law mono into a WAV container (pure Python)."""
-    # Convert μ-law to 16-bit linear PCM using audioop
-    pcm16 = audioop.ulaw2lin(mulaw_bytes, 2)  # 2 bytes/sample
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(8000)
-        wf.writeframes(pcm16)
-    return buf.getvalue()
+async def _transcribe_with_backend(transcriber: StreamingTranscriber, mulaw_bytes: bytes) -> TranscriptionChunk:
+    """Transcribe a buffered μ-law chunk using the configured backend."""
+    try:
+        return await transcriber.transcribe_chunk(mulaw_bytes)
+    except Exception as exc:  # pragma: no cover - resilience
+        logger.error("Local transcription failure: %s", exc)
+        print("[asr] Local transcription failure:", exc)
+        print(traceback.format_exc())
+        return TranscriptionChunk(text="", confidence=None)
 
 
-async def _transcribe_with_openai(wav_bytes: bytes) -> str:
-    """Send a small WAV chunk to OpenAI Whisper for transcription."""
-    if not settings.OPENAI_API_KEY:
-        return ""
-    headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
-    files = {
-        "file": ("chunk.wav", wav_bytes, "audio/wav"),
-    }
-    data = {
-        "model": "whisper-1",
-    }
-    print(f"[asr] Posting {len(wav_bytes)} bytes to Whisper")
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data
-        )
-        try:
-            resp.raise_for_status()
-        except Exception:
-            print("[asr] Whisper HTTP error:", resp.status_code, resp.text[:500])
-            print(traceback.format_exc())
-            raise
-        data = resp.json()
-        text = data.get("text", "").strip()
-        print(f"[asr] Whisper response: '{text}'")
-        return text
-
-
-async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, voice_id: Optional[str]) -> None:
+async def _speak_and_stream(
+    websocket: WebSocket,
+    stream_sid: str,
+    text: str,
+    voice_id: Optional[str],
+    *,
+    tone_hint: Optional[str] = None,
+    locale: Optional[str] = None,
+) -> None:
     """Speak via ElevenLabs; prefer WS low-latency streaming, fallback to HTTP MP3 if needed."""
     if settings.ELEVENLABS_USE_WS_TTS:
         try:
@@ -466,7 +511,12 @@ async def _speak_and_stream(websocket: WebSocket, stream_sid: str, text: str, vo
             # Fall through to HTTP
 
     try:
-        tts = await services.synthesise_elevenlabs_voice(text=text, voice_id=voice_id)
+        tts = await services.synthesise_elevenlabs_voice(
+            text=text,
+            voice_id=voice_id,
+            tone_hint=tone_hint,
+            locale=locale,
+        )
         chunks = _mp3_to_mulaw_chunks(tts["audio_base64"])
     except HTTPException as exc:
         logger.error("TTS failed: %s", exc.detail)
@@ -770,6 +820,7 @@ async def media_stream_endpoint(websocket: WebSocket):
     # Collect conversational turns for end-of-call summary
     conversation: List[Dict[str, Any]] = []
     last_user_activity = time.monotonic()
+    call_start_time: Optional[float] = None
     # Gating flags and thresholds
     greet_in_progress = False
     speaking_out = False
@@ -785,6 +836,8 @@ async def media_stream_endpoint(websocket: WebSocket):
     sales_agent: Optional[SalesAgent] = None
     current_stage: Optional[str] = None
     tts_session: Optional[ElevenLabsStreamer] = None
+    transcriber: Optional[StreamingTranscriber] = None
+    fallback_policies: List[Dict[str, Any]] = []
     in_speech = False
     trailing_silence_ms = 0
 
@@ -802,6 +855,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                 call_sid = stream_info.get("callSid")
                 logger.info("Twilio stream started: %s", stream_sid)
                 print(f"[ws] start | streamSid={stream_sid} callSid={call_sid}")
+                call_start_time = time.monotonic()
                 # Load sales agent context for this call
                 try:
                     sales_agent = await _load_sales_agent_for_call(call_sid)
@@ -810,11 +864,39 @@ async def media_stream_endpoint(websocket: WebSocket):
                             f"[agent] Loaded SalesAgent id={sales_agent.agent_id} user={sales_agent.user_id} voice={sales_agent.voice_id}"
                         )
                         current_stage = STAGE_SEQUENCE[0]
+                        fallback_policies = getattr(sales_agent, "fallback_policies", [])
                     else:
                         print("[agent] No call record found for callSid; falling back to minimal prompt")
                 except Exception as exc:
                     print("[agent] Failed to load SalesAgent:", exc)
                     print(traceback.format_exc())
+                try:
+                    locale_hint = None
+                    if sales_agent and isinstance(sales_agent.persona, dict):
+                        locale_hint = sales_agent.persona.get("locale")
+                    transcriber = StreamingTranscriber(
+                        TranscriberConfig(
+                            backend=settings.ASR_BACKEND,
+                            language=(locale_hint.split("-")[0] if locale_hint else None),
+                            min_rms=settings.ASR_MIN_RMS,
+                            min_utterance_ms=settings.ASR_MIN_UTTERANCE_MS,
+                            max_silence_ms=settings.ASR_MAX_SILENCE_MS,
+                        )
+                    )
+                except Exception as exc:
+                    transcriber = StreamingTranscriber(TranscriberConfig())
+                    logger.warning("ASR backend initialisation fallback: %s", exc)
+                if call_sid:
+                    await live_calls.update_call(
+                        call_sid,
+                        {
+                            "status": "in_progress",
+                            "current_stage": current_stage,
+                            "agent_id": getattr(sales_agent, "agent_id", None),
+                            "lead_name": getattr(sales_agent, "_ws_lead_name", None),
+                            "current_speaker": "agent" if settings.CALL_FIRST_TURN_GREETING else "lead",
+                        },
+                    )
                 if settings.CALL_FIRST_TURN_GREETING:
                     greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
                     greet_in_progress = True
@@ -908,6 +990,8 @@ async def media_stream_endpoint(websocket: WebSocket):
                         try:
                             if tts_session:
                                 await tts_session.cancel()
+                            if sales_agent:
+                                await sales_agent.cancel_active_stream("caller_barged_in")
                         except Exception:
                             pass
                         speaking_out = False
@@ -940,22 +1024,58 @@ async def media_stream_endpoint(websocket: WebSocket):
                                 in_speech = False
                                 trailing_silence_ms = 0
 
-                                # Decode μ-law to WAV and transcribe
+                                # Transcribe buffered utterance via local backend
+                                confidence_score: Optional[float] = None
                                 try:
-                                    wav = _mulaw_to_wav(chunk)
-                                    print(f"[vad] Built WAV: {len(wav)} bytes; sending to ASR…")
-                                    transcript = await _transcribe_with_openai(wav)
+                                    transcription = await _transcribe_with_backend(
+                                        transcriber or StreamingTranscriber(TranscriberConfig()),
+                                        chunk,
+                                    )
+                                    transcript = transcription.text
+                                    confidence_score = _normalize_confidence(transcription.confidence)
+                                    print(f"[asr] Local transcript='{transcript}' confidence={confidence_score}")
                                 except Exception as exc:
                                     logger.error("Transcription error: %s", exc)
                                     print("[asr] Transcription error:", exc)
                                     print(traceback.format_exc())
                                     transcript = ""
+                                    confidence_score = None
+
+                                context_info = {"confidence": confidence_score}
+                                triggered = _evaluate_fallbacks(fallback_policies, context_info)
+                                for policy in triggered:
+                                    await _log_fallback_event(
+                                        sales_agent,
+                                        call_sid,
+                                        reason=policy.get("trigger", "unknown"),
+                                        action=policy.get("action", "noop"),
+                                        extra={"confidence": confidence_score},
+                                    )
+
+                                if not transcript:
+                                    for policy in _evaluate_fallbacks(fallback_policies, {"no_response": True}):
+                                        await _log_fallback_event(
+                                            sales_agent,
+                                            call_sid,
+                                            reason=policy.get("trigger", "no_response"),
+                                            action=policy.get("action", "noop"),
+                                            extra={"confidence": confidence_score},
+                                        )
 
                                 if transcript and transcript != last_transcript:
                                     last_transcript = transcript
                                     last_user_activity = time.monotonic()
                                     logger.info("Caller said: %s", transcript)
                                     print(f"[conv] Caller said: {transcript}")
+                                    if call_sid:
+                                        await live_calls.update_call(
+                                            call_sid,
+                                            {
+                                                "current_speaker": "lead",
+                                                "last_transcript": transcript,
+                                                "confidence": confidence_score,
+                                            },
+                                        )
                                     # Generate reply and speak it
                                     try:
                                         if sales_agent:
@@ -967,15 +1087,41 @@ async def media_stream_endpoint(websocket: WebSocket):
                                             )
                                             reply = gen.get("text", "") or "Thanks for sharing. Could you repeat that?"
                                             current_stage = _next_stage(stage_for_turn)
+                                            # Record token usage for this turn, if provided
+                                            try:
+                                                usage = (gen.get("metadata") or {}).get("usage")
+                                                if usage and call_sid:
+                                                    inc = int(usage.get("total_tokens") or 0)
+                                                    if inc > 0:
+                                                        await get_collection(COLLECTION_CALLS).update_one(
+                                                            {"call_id": call_sid},
+                                                            {"$inc": {"tokens_used": inc}, "$set": {"updated_at": datetime.utcnow()}},
+                                                        )
+                                            except Exception:
+                                                pass
                                         else:
-                                            # Fallback minimal prompt
-                                            reply = await services.call_openai_chat(
+                                            # Fallback minimal prompt using critical model
+                                            from apps.agents.llm_client import complete_chat as _complete_chat
+                                            resp = await _complete_chat(
                                                 [
                                                     {"role": "system", "content": "You are Scriza Sales AI; reply concisely and helpfully."},
                                                     {"role": "user", "content": transcript},
                                                 ],
-                                                model=settings.OPENAI_MODEL,
+                                                model=getattr(settings, "OPENAI_MODEL_CRITICAL", settings.OPENAI_MODEL),
                                             )
+                                            try:
+                                                reply = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "").strip() or "Thanks for sharing. Could you repeat that?"
+                                            except Exception:
+                                                reply = "Thanks for sharing. Could you repeat that?"
+                                            # Opportunistically record token usage when available
+                                            try:
+                                                if call_sid and resp.get("usage"):
+                                                    await get_collection(COLLECTION_CALLS).update_one(
+                                                        {"call_id": call_sid},
+                                                        {"$inc": {"tokens_used": int(resp["usage"].get("total_tokens", 0))}, "$set": {"updated_at": datetime.utcnow()}},
+                                                    )
+                                            except Exception:
+                                                pass
                                         print(f"[conv] Agent reply: {reply}")
                                     except HTTPException as exc:
                                         logger.error("LLM error: %s", exc.detail)
@@ -995,6 +1141,7 @@ async def media_stream_endpoint(websocket: WebSocket):
                                         "user": transcript,
                                         "agent": reply,
                                         "stage": stage_for_turn if 'stage_for_turn' in locals() else current_stage,
+                                        "confidence": confidence_score,
                                     }
                                     conversation.append(turn)
                                     # Persist to calls collection
@@ -1016,6 +1163,11 @@ async def media_stream_endpoint(websocket: WebSocket):
                                     )
 
                                     speaking_out = True
+                                    tone_hint = None
+                                    locale_hint = None
+                                    if sales_agent and isinstance(sales_agent.persona, dict):
+                                        tone_hint = sales_agent.persona.get("tone_override") or sales_agent.persona.get("tone")
+                                        locale_hint = sales_agent.persona.get("locale")
                                     try:
                                         use_voice = (sales_agent.voice_id if (sales_agent and sales_agent.voice_id) else (settings.ELEVENLABS_DEFAULT_VOICE_ID or None))
                                         if settings.ELEVENLABS_USE_WS_TTS and use_voice:
@@ -1028,9 +1180,33 @@ async def media_stream_endpoint(websocket: WebSocket):
                                                 stream_sid=stream_sid or "",
                                                 text=reply,
                                                 voice_id=use_voice,
+                                                tone_hint=tone_hint,
+                                                locale=locale_hint,
                                             )
+                                    except Exception as exc:
+                                        logger.error("TTS streaming error: %s", exc)
+                                        print("[tts] Streaming error:", exc)
+                                        print(traceback.format_exc())
+                                        if stream_sid:
+                                            await _stream_silence(websocket, stream_sid, duration=2.0)
+                                        await _log_fallback_event(
+                                            sales_agent,
+                                            call_sid,
+                                            reason="tts_error",
+                                            action="maintain_voice_stream",
+                                            extra={"error": str(exc)},
+                                        )
                                     finally:
                                         speaking_out = False
+                                    if call_sid:
+                                        await live_calls.update_call(
+                                            call_sid,
+                                            {
+                                                "current_speaker": "agent",
+                                                "last_reply": reply,
+                                                "stage": current_stage,
+                                            },
+                                        )
 
                                 processing = False
                 except (binascii.Error, ValueError) as exc:
@@ -1079,21 +1255,34 @@ async def media_stream_endpoint(websocket: WebSocket):
                         (t.get("user") or "").strip()[:200],
                         (t.get("agent") or "").strip()[:200],
                     )
-                # Mark call completed in DB
+                # Mark call completed in DB and record duration
                 try:
                     if 'call_sid' in locals() and call_sid:
+                        duration_sec = None
+                        try:
+                            if call_start_time is not None:
+                                duration_sec = max(0.0, float(time.monotonic() - call_start_time))
+                        except Exception:
+                            duration_sec = None
+                        update_ops = {"$set": {"status": "completed", "updated_at": datetime.utcnow()}}
+                        if duration_sec is not None:
+                            update_ops["$set"]["duration_seconds"] = duration_sec
                         res = await get_collection(COLLECTION_CALLS).update_one(
                             {"call_id": call_sid},
-                            {"$set": {"status": "completed", "updated_at": datetime.utcnow()}},
+                            update_ops,
                         )
                         print(f"[db] Marked call completed: matched={res.matched_count} modified={res.modified_count}")
                 except Exception as exc:
                     print("[db] Failed to mark call completed:", exc)
                     print(traceback.format_exc())
+                if call_sid:
+                    await live_calls.remove_call(call_sid)
                 break
     except WebSocketDisconnect:
         logger.info("Twilio stream disconnected: %s", stream_sid)
         print(f"[ws] disconnected | streamSid={stream_sid}")
+        if 'call_sid' in locals() and call_sid:
+            await live_calls.remove_call(call_sid)
     finally:
         if greeting_task:
             greeting_task.cancel()
