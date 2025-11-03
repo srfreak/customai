@@ -13,6 +13,6 @@ passlib[argon2]
 argon2-cffi
 beautifulsoup4==4.12.3
 openai==1.59.3
+Jinja2==3.0.3
 redis==5.0.8
 aiofiles
-
