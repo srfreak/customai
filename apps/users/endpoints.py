@@ -116,17 +116,25 @@ async def login_user(login_request: LoginRequest):
     
     # Create access token
     access_token_expires = timedelta(minutes=30)
+    # Ensure enum is encoded as its string value
+    role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
     access_token = create_access_token(
-        data={"sub": user.user_id, "role": user.role},
+        data={"sub": user.user_id, "role": role_value},
         expires_delta=access_token_expires
     )
     
     return {"access_token": access_token, "token_type": "bearer"}
 
+async def _get_user_by_id(user_id: str) -> Optional[UserInDB]:
+    users_collection = get_collection(COLLECTION_USERS)
+    doc = await users_collection.find_one({"user_id": user_id})
+    return UserInDB(**doc) if doc else None
+
+
 @router.get("/profile", response_model=UserInResponse)
 async def get_user_profile(user: dict = Depends(verify_token)):
     """Get user profile"""
-    user_doc = await get_user_by_email(user["user_id"])
+    user_doc = await _get_user_by_id(user["user_id"])  # lookup by user_id from JWT
     if not user_doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
