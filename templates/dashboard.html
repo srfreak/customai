@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scriza Control Center</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <h2>Scriza Console</h2>
+        <button class="nav-link active" data-target="overview">Overview</button>
+        <button class="nav-link" data-target="call">Call Orchestrator</button>
+        <button class="nav-link" data-target="voice">Voice Synthesis</button>
+        
+        <button class="nav-link" data-target="business-agent">Business Agents</button>
+        <button class="nav-link admin-only" data-target="users">User Directory</button>
+        <button class="nav-link admin-only" data-target="ops">Ops Dashboard</button>
+        <a class="nav-link" href="/docs" target="_blank">API Reference</a>
+      </aside>
+      <main class="main">
+        <header>
+          <div>
+            <h1 id="welcome-title">Welcome</h1>
+            <p id="welcome-subtitle" style="color: var(--muted); margin-top: 6px;">
+              Authenticating…
+            </p>
+          </div>
+          <div class="actions">
+            <button class="secondary" id="refresh-profile">Refresh Profile</button>
+            <button class="primary" id="logout-btn">Logout</button>
+          </div>
+        </header>
+
+        <section id="panel-overview" class="panel active">
+          <h3>Session Snapshot</h3>
+          <div class="grid-two">
+            <div class="result">
+              <h4>Decoded Token</h4>
+              <pre id="token-info">{}</pre>
+            </div>
+            <div class="result">
+              <h4>Profile</h4>
+              <pre id="profile-info">Loading…</pre>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-strategy" class="panel">
+          <h3>Strategy Studio</h3>
+          <div class="result" style="margin-bottom: 18px;">
+            <h4>Need a head start?</h4>
+            <p style="margin:0;color:var(--muted);">
+              Describe your product, audience, tone, and goals. GPT-4o will draft a full strategy and pre-fill the form below.
+              Mention differentiators, common objections, buyer personas, and closing expectations.
+            </p>
+          </div>
+          <label for="strategy-agent-select">Select Agent</label>
+          <select id="strategy-agent-select" required>
+            <option value="">Loading agents…</option>
+          </select>
+          <div id="agent-preview"></div>
+          <button type="button" id="open-strategy-modal" class="secondary" style="margin-bottom: 20px;">Ingest Strategy</button>
+          <form id="ai-strategy-form" style="margin-bottom: 20px;">
+            <label for="ai-purpose">Purpose / Context</label>
+            <textarea id="ai-purpose" required placeholder="e.g. We sell an AI sales copilot to mid-market SaaS companies who need higher demo bookings..."></textarea>
+            <div class="grid-two">
+              <div>
+                <label for="ai-buyer">Buyer Persona Hints</label>
+                <input id="ai-buyer" placeholder="e.g. VP Sales at SaaS, SDR managers" />
+              </div>
+              <div>
+                <label for="ai-offerings">Product / Offering Highlights</label>
+                <input id="ai-offerings" placeholder="Key features, pricing style, guarantees" />
+              </div>
+            </div>
+            <div class="grid-two">
+              <div>
+                <label for="ai-tone">Desired Tone</label>
+                <input id="ai-tone" placeholder="friendly, consultative, assertive..." />
+              </div>
+              <div>
+                <label for="ai-language">Preferred Language / Locale</label>
+                <input id="ai-language" placeholder="en-IN, en-US, hi-IN..." />
+              </div>
+            </div>
+            <button type="submit" class="secondary" id="ai-strategy-btn">Let AI write the Strategy</button>
+          </form>
+          <div class="result" style="margin-bottom: 18px;">
+            <h4>AI Draft Output</h4>
+            <pre id="ai-strategy-result">Provide context above and let the model draft your strategy.</pre>
+          </div>
+          <form id="strategy-form">
+            <div class="grid-two">
+              <div>
+                <label for="strategy-title">Title</label>
+                <input id="strategy-title" name="title" required placeholder="Enterprise SaaS Sales" />
+              </div>
+              <div>
+                <label for="strategy-persona">Persona Name</label>
+                <input id="strategy-persona" name="persona" placeholder="Scrappy Singh" />
+              </div>
+            </div>
+            <label for="strategy-description">Description</label>
+            <textarea id="strategy-description" name="description" placeholder="Pipeline for demo booking and qualification."></textarea>
+
+            <div class="grid-two">
+              <div>
+                <label for="strategy-goals">Goals (comma separated)</label>
+                <input id="strategy-goals" name="goals" placeholder="book_demo,capture_feedback" />
+              </div>
+              <div>
+                <label for="strategy-tone">Tone Override</label>
+                <select id="strategy-tone" name="tone_override">
+                  <option value="">Auto</option>
+                  <option value="friendly">Friendly</option>
+                  <option value="assertive">Assertive</option>
+                  <option value="empathetic">Empathetic</option>
+                  <option value="humorous">Humorous</option>
+                </select>
+              </div>
+            </div>
+
+            <label for="strategy-json">Advanced JSON (optional)</label>
+            <textarea id="strategy-json" name="json" placeholder='{ "scripts": { "greeting": "Namaste!" } }'></textarea>
+
+            <button type="submit">Ingest Strategy</button>
+          </form>
+          <div class="result">
+            <h4>Response</h4>
+            <pre id="strategy-result">{}</pre>
+          </div>
+        </section>
+
+        <section id="panel-call" class="panel">
+          <h3>Call Orchestrator</h3>
+          <form id="call-form">
+            <div class="grid-two">
+              <div>
+                <label for="call-lead-name">Lead Name</label>
+                <input id="call-lead-name" required placeholder="Arjun" />
+              </div>
+              <div>
+                <label for="call-lead-phone">Lead Phone</label>
+                <input id="call-lead-phone" required placeholder="+15555551234" />
+              </div>
+            </div>
+            <label for="call-agent-select">Agent</label>
+            <select id="call-agent-select">
+              <option value="">Select agent…</option>
+            </select>
+            <button type="submit">Start Call</button>
+          </form>
+          <div class="result">
+            <h4>Call Result</h4>
+            <pre id="call-result">{}</pre>
+          </div>
+        </section>
+
+        <section id="panel-voice" class="panel">
+          <h3>Voice Synthesis</h3>
+          <form id="voice-form">
+            <label for="voice-text">Text</label>
+            <textarea id="voice-text" required placeholder="Thank you for taking the call today!"></textarea>
+            <label for="voice-id">Voice ID (optional)</label>
+            <input id="voice-id" placeholder="Override ElevenLabs voice" />
+            <button type="submit">Generate Audio</button>
+          </form>
+          <div class="result">
+            <h4>Audio Preview</h4>
+            <audio id="voice-audio" class="audio-preview" controls style="display: none;"></audio>
+            <pre id="voice-result">{}</pre>
+          </div>
+        </section>
+
+        <section id="panel-memory" class="panel">
+          <h3>Memory Browser</h3>
+          <form id="agent-create-form" style="margin-bottom: 16px;">
+            <div class="grid-two">
+              <div>
+                <label for="new-agent-name">Agent Name</label>
+                <input id="new-agent-name" required placeholder="Scriza Sales Pro" />
+              </div>
+              <div>
+                <label for="new-agent-identifier">Custom Agent ID (optional)</label>
+                <input id="new-agent-identifier" placeholder="sales-pro-1" />
+              </div>
+            </div>
+            <div class="grid-two">
+              <div>
+                <label for="new-agent-voice">Preferred Voice ID (optional)</label>
+                <input id="new-agent-voice" placeholder="ElevenLabs voice id" />
+              </div>
+              <div>
+                <label for="new-agent-locale">Locale (optional)</label>
+                <input id="new-agent-locale" placeholder="en-IN" />
+              </div>
+            </div>
+            <label for="new-agent-tone">Tone Override</label>
+            <select id="new-agent-tone">
+              <option value="">Auto</option>
+              <option value="friendly">Friendly</option>
+              <option value="assertive">Assertive</option>
+              <option value="empathetic">Empathetic</option>
+              <option value="humorous">Humorous</option>
+            </select>
+            <button type="submit">Create Agent</button>
+          </form>
+          <div class="result" style="margin-bottom: 16px;">
+            <h4>Create Agent Result</h4>
+            <pre id="agent-create-result">Use the form above to register a new agent.</pre>
+          </div>
+          <form id="memory-form">
+            <label for="memory-agent-select">Select Agent</label>
+            <select id="memory-agent-select">
+              <option value="">Loading agents…</option>
+            </select>
+            <label for="memory-agent" style="margin-top:12px;">Or enter Agent ID manually</label>
+            <input id="memory-agent" placeholder="sales-agent" />
+            <div class="grid-two">
+              <button type="submit">Fetch Memory</button>
+              <button type="button" class="secondary" id="memory-clear">Clear Entire Memory</button>
+            </div>
+          </form>
+          <div class="result">
+            <h4>Memory Records</h4>
+            <pre id="memory-result">Run a query to inspect history.</pre>
+          </div>
+        </section>
+
+        <section id="panel-business-agent" class="panel">
+          <style>
+            .wizard-step{display:none}
+            .wizard-step.active{display:block}
+            .muted{color:var(--muted)}
+            .hint{font-size:12px;color:var(--muted)}
+            .switch{position:relative;display:inline-block;width:42px;height:24px;vertical-align:middle;margin-right:8px}
+            .switch input{opacity:0;width:0;height:0}
+            .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#e5e7eb;transition:.2s;border-radius:9999px}
+            .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:white;transition:.2s;border-radius:9999px}
+            .switch input:checked + .slider{background:#10b981}
+            .switch input:checked + .slider:before{transform:translateX(18px)}
+            .btn-row{display:flex;gap:10px;align-items:center;margin-top:14px}
+            .btn-back{background:#f3f4f6;color:#111827;border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px}
+            .btn-primary[disabled]{opacity:.6;cursor:not-allowed}
+            .counter{font-size:12px;color:var(--muted);float:right}
+          </style>
+          <div style="margin-bottom:18px;">
+            <h3 style="margin-bottom:4px;">Agents</h3>
+            <p class="muted" style="margin-top:0">Create and manage your AI agents</p>
+            <div class="grid-two" style="align-items:center;gap:12px;">
+              <input id="agent-search" placeholder="Search agents…" />
+              <div style="text-align:right;">
+                <button id="btn-new-agent" class="primary">+ New agent</button>
+              </div>
+            </div>
+            <div class="table-wrapper" style="margin-top:10px;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Created by</th>
+                    <th>Created at</th>
+                  </tr>
+                </thead>
+                <tbody id="agents-list">
+                  <tr><td colspan="3" class="muted">Loading…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="agent-details" class="result" style="display:none;">
+            <h4 id="agent-details-title">Agent Details</h4>
+            <div class="muted" id="agent-details-sub"></div>
+            <div class="result" style="margin-top:10px;">
+              <h4>Recent Conversation History</h4>
+              <div id="agent-history-empty" class="muted">No conversations yet.</div>
+              <div id="agent-history-list"></div>
+            </div>
+            <div class="btn-row">
+              <button id="btn-open-strategy" class="primary">Open Strategy</button>
+            </div>
+          </div>
+
+          <div id="wizard-step-1" class="wizard-step">
+            <h3 style="margin-bottom:4px;">What industry is your business in?</h3>
+            <p class="muted" style="margin-top:0">Select the industry that best describes your business</p>
+            <label for="industry-select">Industry</label>
+            <select id="industry-select"></select>
+            <div id="industry-options" class="option-grid" style="display:none;"></div>
+            <div class="btn-row"><button id="wiz1-back" class="btn-back" type="button">Back</button></div>
+          </div>
+
+          <div id="wizard-step-2" class="wizard-step">
+            <h3 style="margin-bottom:4px;">Use case</h3>
+            <p class="muted" style="margin-top:0">What will your agent help with?</p>
+            <label for="usecase-select">Use case</label>
+            <select id="usecase-select"></select>
+            <div id="usecase-options" class="option-grid" style="display:none;"></div>
+            <div class="btn-row"><button id="wiz2-back" class="btn-back" type="button">Back</button></div>
+          </div>
+
+          <div id="wizard-step-3" class="wizard-step">
+            <h3 style="margin-bottom:4px;">Complete your agent</h3>
+            <p class="muted" style="margin-top:0">Name your agent, describe its goal, and optionally add your website</p>
+            <form id="agent-complete-form" style="margin-top:8px;max-width:720px">
+              <label for="agent-name">Agent Name <span style="color:#ef4444">*</span> <span class="counter" id="agent-name-count">0/50</span></label>
+              <input id="agent-name" maxlength="50" placeholder="Enter agent name..." required />
+
+              <label for="agent-website" style="margin-top:12px;">Website (Optional)</label>
+              <input id="agent-website" type="url" placeholder="https://yourwebsite.com" />
+              <div class="hint">We'll only access publicly available information from your website to personalize your agent.</div>
+
+              <label for="agent-goal" style="margin-top:12px;">Main Goal <span style="color:#ef4444">*</span></label>
+              <textarea id="agent-goal" placeholder="Describe what you want your agent to accomplish..." required style="min-height:96px"></textarea>
+
+              <div style="margin-top:12px;display:flex;align-items:center;gap:8px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;padding:12px;">
+                <label class="switch"><input id="agent-chat-only" type="checkbox" /><span class="slider"></span></label>
+                <div>
+                  <strong>Chat only</strong>
+                  <div class="hint">Audio will not be processed and only text will be used</div>
+                </div>
+              </div>
+
+              <div class="btn-row">
+                <button id="wiz3-back" class="btn-back" type="button">Back</button>
+                <button id="create-agent-btn" class="primary btn-primary" type="submit" disabled>Create Agent</button>
+              </div>
+            </form>
+            <div id="preset-preview" class="result" style="display:none;margin-top:12px;">
+              <h4>Preset Preview</h4>
+              <pre id="preset-preview-text">Select an industry and use case to view smart defaults.</pre>
+            </div>
+            <div class="result" style="margin-top:16px;">
+              <h4>Creation Result</h4>
+              <pre id="business-agent-result">Select industry and use case to get started.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-users" class="panel">
+          <h3>Admin • User Directory</h3>
+          <form id="user-create-form" style="margin-bottom: 18px;">
+            <div class="grid-two">
+              <div>
+                <label for="create-email">Email</label>
+                <input id="create-email" type="email" required placeholder="new.user@example.com" />
+              </div>
+              <div>
+                <label for="create-password">Password</label>
+                <input id="create-password" type="password" required placeholder="Secure password" />
+              </div>
+            </div>
+            <div class="grid-two">
+              <div>
+                <label for="create-first-name">First Name</label>
+                <input id="create-first-name" required placeholder="First name" />
+              </div>
+              <div>
+                <label for="create-last-name">Last Name</label>
+                <input id="create-last-name" required placeholder="Last name" />
+              </div>
+            </div>
+            <div class="grid-two">
+              <div>
+                <label for="create-company">Company</label>
+                <input id="create-company" placeholder="Company (optional)" />
+              </div>
+              <div>
+                <label for="create-role">Role</label>
+                <select id="create-role">
+                  <option value="user">User</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+            </div>
+            <button type="submit">Create User</button>
+          </form>
+          <div class="result" style="margin-bottom: 16px;">
+            <h4>Create User Result</h4>
+            <pre id="user-create-result">Fill the form above to create a new account.</pre>
+          </div>
+          <button id="refresh-users" class="secondary" style="margin-bottom: 12px;">Refresh Directory</button>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Name</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="users-table">
+                <tr><td colspan="4">Load the directory to view users.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="panel-ops" class="panel">
+          <h3>Ops Dashboard</h3>
+          <p style="color: var(--muted);">
+            Real-time telemetry is available via the live Ops console. Open it in a new tab to keep your dashboard running.
+          </p>
+          <a id="launch-ops" class="primary" href="#" style="display:inline-block;padding:12px 18px;border-radius:10px;background:linear-gradient(90deg, var(--accent), var(--accent-alt));color:white;text-decoration:none;">Launch Ops Console</a>
+          <div class="result" style="margin-top:16px;">
+            <h4>Fallback Timeline (Latest)</h4>
+            <pre id="ops-timeline">Fetch admin telemetry to populate.</pre>
+            <button class="secondary" id="refresh-timeline" style="margin-top:12px;">Refresh Timeline</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script>
+      const navLinks = document.querySelectorAll(".nav-link");
+      const panels = document.querySelectorAll(".panel");
+      const welcomeTitle = document.getElementById("welcome-title");
+      const welcomeSubtitle = document.getElementById("welcome-subtitle");
+      const tokenInfo = document.getElementById("token-info");
+      const profileInfo = document.getElementById("profile-info");
+      const logoutBtn = document.getElementById("logout-btn");
+      const refreshProfileBtn = document.getElementById("refresh-profile");
+      const usersTable = document.getElementById("users-table");
+      const refreshUsersBtn = document.getElementById("refresh-users");
+      const refreshTimelineBtn = document.getElementById("refresh-timeline");
+      const opsTimeline = document.getElementById("ops-timeline");
+      const userCreateForm = document.getElementById("user-create-form");
+      const userCreateResult = document.getElementById("user-create-result");
+      const agentCreateForm = document.getElementById("agent-create-form");
+      const agentCreateResult = document.getElementById("agent-create-result");
+      const memoryAgentSelect = document.getElementById("memory-agent-select");
+      const memoryAgentInput = document.getElementById("memory-agent");
+      const aiStrategyForm = document.getElementById("ai-strategy-form");
+      const aiStrategyResult = document.getElementById("ai-strategy-result");
+      const aiStrategyBtn = document.getElementById("ai-strategy-btn");
+      const businessAgentResult = document.getElementById("business-agent-result");
+      const agentCompleteForm = document.getElementById("agent-complete-form");
+      const agentNameEl = document.getElementById("agent-name");
+      const agentNameCount = document.getElementById("agent-name-count");
+      const agentGoalEl = document.getElementById("agent-goal");
+      const agentWebsiteEl = document.getElementById("agent-website");
+      const chatOnlyEl = document.getElementById("agent-chat-only");
+      const step1 = document.getElementById("wizard-step-1");
+      const step2 = document.getElementById("wizard-step-2");
+      const step3 = document.getElementById("wizard-step-3");
+      const wiz1Back = document.getElementById("wiz1-back");
+      const wiz2Back = document.getElementById("wiz2-back");
+      const wiz3Back = document.getElementById("wiz3-back");
+      const industryOptionsGrid = document.getElementById("industry-options");
+      const usecaseOptionsGrid = document.getElementById("usecase-options");
+      const industrySelect = document.getElementById("industry-select");
+      const usecaseSelect = document.getElementById("usecase-select");
+      const launchOpsBtn = document.getElementById("launch-ops");
+      const agentsListBody = document.getElementById("agents-list");
+      const agentSearchInput = document.getElementById("agent-search");
+      const btnNewAgent = document.getElementById("btn-new-agent");
+      const agentDetails = document.getElementById("agent-details");
+      const agentDetailsTitle = document.getElementById("agent-details-title");
+      const agentDetailsSub = document.getElementById("agent-details-sub");
+      const agentHistoryList = document.getElementById("agent-history-list");
+      const agentHistoryEmpty = document.getElementById("agent-history-empty");
+      const btnOpenStrategy = document.getElementById("btn-open-strategy");
+      const callAgentSelect = document.getElementById("call-agent-select");
+      let agentsCache = [];
+      let industryOptionsMeta = [];
+      let useCaseOptionsMeta = [];
+      let selectedIndustry = null;
+      let selectedUseCase = null;
+      let lastPreset = null;
+
+      function activatePanel(target) {
+        panels.forEach((panel) => {
+          panel.classList.toggle("active", panel.id === `panel-${target}`);
+        });
+        navLinks.forEach((link) => {
+          link.classList.toggle("active", link.dataset.target === target);
+        });
+      }
+
+      function showStep(idx){
+        [step1,step2,step3].forEach((el,i)=>el.classList.toggle("active", i===idx-1));
+      }
+
+      navLinks.forEach((link) => {
+        link.addEventListener("click", () => {
+          activatePanel(link.dataset.target);
+        });
+      });
+
+      function updateTokenDisplay(auth) {
+        tokenInfo.textContent = JSON.stringify(auth.payload, null, 2);
+        welcomeTitle.textContent = `Welcome ${auth.payload?.role?.toUpperCase() || ""}`;
+      }
+
+      async function loadProfile() {
+        try {
+          const data = await window.scrizaAuth.authFetch("/api/v1/user/profile");
+          profileInfo.textContent = JSON.stringify(data, null, 2);
+          welcomeSubtitle.textContent = `${data.first_name || ""} ${data.last_name || ""} • ${data.email}`;
+        } catch (err) {
+          profileInfo.textContent = JSON.stringify({ error: err.message }, null, 2);
+          welcomeSubtitle.textContent = "Profile unavailable";
+        }
+      }
+
+      async function loadUsers() {
+        try {
+          const users = await window.scrizaAuth.authFetch("/api/v1/admin/users");
+          usersTable.innerHTML = users
+            .map(
+              (user) => `
+              <tr>
+                <td>${user.email}</td>
+                <td>${user.first_name || ""} ${user.last_name || ""}</td>
+                <td><span class="badge">${user.role}</span></td>
+                <td><span class="badge ${user.is_active ? "success" : "danger"}">${user.is_active ? "Active" : "Disabled"}</span></td>
+              </tr>`
+            )
+            .join("");
+        } catch (err) {
+          usersTable.innerHTML = `<tr><td colspan="4">${err.message}</td></tr>`;
+        }
+      }
+
+      async function loadTimeline() {
+        try {
+          const data = await window.scrizaAuth.authFetch("/api/v1/ops/feedback_timeline");
+          opsTimeline.textContent = JSON.stringify(data.timeline || [], null, 2);
+        } catch (err) {
+          opsTimeline.textContent = JSON.stringify({ error: err.message }, null, 2);
+        }
+      }
+
+      function prefillStrategyForm(strategy) {
+        if (!strategy || typeof strategy !== "object") {
+          return;
+        }
+        const titleField = document.getElementById("strategy-title");
+        const descField = document.getElementById("strategy-description");
+        const goalsField = document.getElementById("strategy-goals");
+        const personaField = document.getElementById("strategy-persona");
+        const toneField = document.getElementById("strategy-tone");
+        const advancedField = document.getElementById("strategy-json");
+
+        if (titleField) titleField.value = strategy.title || "";
+        if (descField) descField.value = strategy.description || "";
+        if (goalsField) goalsField.value = Array.isArray(strategy.goals) ? strategy.goals.join(",") : "";
+        if (personaField) personaField.value = strategy.persona?.name || "";
+        if (toneField) {
+          const override = strategy.persona?.tone_override || "";
+          toneField.value = Array.from(toneField.options).some(opt => opt.value === override) ? override : "";
+        }
+        if (advancedField) {
+          try {
+            advancedField.value = JSON.stringify(strategy, null, 2);
+          } catch (err) {
+            advancedField.value = "";
+          }
+        }
+      }
+
+      function formatDate(ts) {
+        try { return new Date(ts).toLocaleString(); } catch { return ""; }
+      }
+
+      let selectedAgentId = null;
+      let selectedAgentName = null;
+
+      function renderAgentsTable(filterTerm = "") {
+        if (!agentsListBody) return;
+        const term = (filterTerm || "").toLowerCase();
+        const rows = (agentsCache || [])
+          .filter(a => !term || (a.name||"").toLowerCase().includes(term) || (a.agent_id||"").toLowerCase().includes(term))
+          .map(a => {
+            const name = a.name || a.agent_id;
+            const createdAt = a.created_at ? formatDate(a.created_at) : "";
+            const createdBy = welcomeSubtitle?.textContent?.split("•")?.pop()?.trim() || "you";
+            return `<tr data-agent-id="${a.agent_id}">
+              <td class="agent-name">${name}</td>
+              <td>${createdBy}</td>
+              <td>${createdAt}</td>
+            </tr>`;
+          });
+        agentsListBody.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="3" class="muted">No agents yet</td></tr>';
+        // Click handler → show simple details + recent history
+        agentsListBody.querySelectorAll("tr[data-agent-id]").forEach(tr => {
+          tr.addEventListener("click", () => {
+            selectedAgentId = tr.getAttribute("data-agent-id");
+            const rowName = tr.querySelector('.agent-name')?.textContent || selectedAgentId;
+            selectedAgentName = rowName;
+            if (agentDetails) agentDetails.style.display = 'block';
+            if (agentDetailsTitle) agentDetailsTitle.textContent = `Agent: ${rowName}`;
+            if (agentDetailsSub) agentDetailsSub.textContent = `ID: ${selectedAgentId}`;
+            if (memoryAgentSelect) memoryAgentSelect.value = selectedAgentId;
+            if (memoryAgentInput) memoryAgentInput.value = selectedAgentId;
+            loadRecentMemories(selectedAgentId);
+          });
+        });
+      }
+
+      async function loadRecentMemories(agentId) {
+        if (!agentHistoryList || !agentHistoryEmpty) return;
+        agentHistoryList.innerHTML = '';
+        agentHistoryEmpty.style.display = 'block';
+        try {
+          const data = await window.scrizaAuth.authFetch(`/api/v1/memory/list/${agentId}`);
+          const mems = Array.isArray(data.memories) ? data.memories.slice(0, 10) : [];
+          if (mems.length === 0) {
+            agentHistoryEmpty.style.display = 'block';
+            return;
+          }
+          agentHistoryEmpty.style.display = 'none';
+          const items = mems.map((m) => {
+            const ts = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+            const u = (m.user_text || m.data?.conversation?.[0]?.user || '').toString().trim();
+            const a = (m.agent_text || m.data?.conversation?.[0]?.agent || '').toString().trim();
+            return `<div style="padding:8px 0;border-bottom:1px dashed rgba(148,163,184,0.2)">
+              <div class="muted" style="font-size:12px;">${ts}</div>
+              <div><strong>You:</strong> ${u || '<em>—</em>'}</div>
+              <div><strong>Agent:</strong> ${a || '<em>—</em>'}</div>
+            </div>`;
+          });
+          agentHistoryList.innerHTML = items.join('');
+        } catch (err) {
+          agentHistoryEmpty.style.display = 'block';
+          agentHistoryEmpty.textContent = `Unable to load history: ${err.message}`;
+        }
+      }
+
+      async function loadAgents() {
+        try {
+          const agents = await window.scrizaAuth.authFetch("/api/v1/agent/sales/agents");
+          agentsCache = Array.isArray(agents) ? agents : [];
+          renderAgentsTable(agentSearchInput?.value || "");
+          if (memoryAgentSelect) {
+            if (agentsCache.length === 0) {
+              memoryAgentSelect.innerHTML = '<option value="">No agents yet</option>';
+              if (memoryAgentInput) memoryAgentInput.value = "";
+            } else {
+              memoryAgentSelect.innerHTML = ['<option value="">Select agent…</option>'].concat(
+                agentsCache.map(
+                  (agent) => `<option value="${agent.agent_id}">${agent.name || agent.agent_id}</option>`
+                )
+              ).join("");
+              memoryAgentSelect.value = agentsCache[0].agent_id;
+              if (memoryAgentInput) memoryAgentInput.value = agentsCache[0].agent_id;
+            }
+          }
+          // Populate Strategy Studio select
+          const stratSelect = document.getElementById("strategy-agent-select");
+          if (stratSelect) {
+            if (agentsCache.length === 0) {
+              stratSelect.innerHTML = '<option value="">No agents yet</option>';
+            } else {
+              stratSelect.innerHTML = ['<option value="">Select agent…</option>'].concat(
+                agentsCache.map((agent) => `<option value="${agent.agent_id}">${agent.name || agent.agent_id}</option>`)
+              ).join("");
+              if (!stratSelect.value) stratSelect.value = agentsCache[0].agent_id;
+            }
+          }
+          // Populate Call Orchestrator select
+          if (callAgentSelect) {
+            if (agentsCache.length === 0) {
+              callAgentSelect.innerHTML = '<option value="">No agents yet</option>';
+            } else {
+              callAgentSelect.innerHTML = ['<option value="">Select agent…</option>'].concat(
+                agentsCache.map((agent) => `<option value="${agent.agent_id}">${agent.name || agent.agent_id}</option>`)
+              ).join("");
+              if (!callAgentSelect.value) callAgentSelect.value = selectedAgentId || agentsCache[0].agent_id;
+            }
+          }
+        } catch (err) {
+          if (memoryAgentSelect) {
+            memoryAgentSelect.innerHTML = `<option value="">${err.message}</option>`;
+          }
+        }
+      }
+
+      function renderOptionButtons(container, items, selectedValue, onSelect) {
+        if (!container) return;
+        if (!items || items.length === 0) {
+          container.innerHTML = '<div class="muted">No options available.</div>';
+          return;
+        }
+        container.innerHTML = items
+          .map(
+            (item) => `
+            <button type="button" class="option-button ${selectedValue === item.id ? "active" : ""}" data-id="${item.id}">
+              ${item.label}
+            </button>`
+          )
+          .join("");
+        container.querySelectorAll(".option-button").forEach((button) => {
+          button.addEventListener("click", () => onSelect(button.dataset.id));
+        });
+      }
+
+      function idToLabel(list, id) {
+        const found = (list || []).find((x) => x.id === id);
+        return found ? found.label : id;
+      }
+
+      async function fetchAndApplyPreset() {
+        const preview = document.getElementById("preset-preview");
+        const previewText = document.getElementById("preset-preview-text");
+        if (!selectedIndustry || !selectedUseCase) {
+          if (preview) preview.style.display = "none";
+          lastPreset = null;
+          return;
+        }
+        try {
+          const industryLabel = idToLabel(industryOptionsMeta, selectedIndustry);
+          const useCaseLabel = idToLabel(useCaseOptionsMeta, selectedUseCase);
+          const res = await window.scrizaAuth.authFetch(
+            `/api/v1/templates/preset?industry=${encodeURIComponent(industryLabel)}&use_case=${encodeURIComponent(useCaseLabel)}`
+          );
+          lastPreset = res.preset || null;
+          if (preview) preview.style.display = "block";
+          if (previewText) {
+            const persona = (lastPreset && lastPreset.persona) || {};
+            const tone = persona.tone || "adaptive";
+            const voice = persona.voice_id || "<default>";
+            const goal = (lastPreset && (lastPreset.goals || [])[0]) || "book_meeting";
+            previewText.textContent = `You’re building a ${industryLabel} ${useCaseLabel} agent.\nTone: ${tone}\nVoice: ${voice}\nGoal: ${goal}`;
+          }
+          // Pre-fill form fields if empty
+          const nameEl = document.getElementById("agent-name");
+          const goalEl = document.getElementById("agent-goal");
+          if (nameEl && !nameEl.value && lastPreset?.persona?.name) nameEl.value = lastPreset.persona.name;
+          if (goalEl && !goalEl.value && lastPreset?.goals?.length) goalEl.value = lastPreset.goals[0];
+          try { localStorage.setItem("agentPreset", JSON.stringify(lastPreset || {})); } catch (e) {}
+        } catch (err) {
+          if (preview) preview.style.display = "block";
+          if (previewText) previewText.textContent = `No preset found for the selected combination.`;
+          lastPreset = null;
+        }
+      }
+
+      async function loadBusinessMetadata() {
+        try {
+          const metadata = await window.scrizaAuth.authFetch("/api/v1/agent/sales/agents/metadata");
+          industryOptionsMeta = metadata.industries || [];
+          useCaseOptionsMeta = metadata.use_cases || [];
+          if (!selectedIndustry && industryOptionsMeta.length) {
+            selectedIndustry = industryOptionsMeta[0].id;
+          }
+          if (!selectedUseCase && useCaseOptionsMeta.length) {
+            selectedUseCase = useCaseOptionsMeta[0].id;
+          }
+          // Populate dropdowns
+          if (industrySelect) {
+            industrySelect.innerHTML = (industryOptionsMeta || [])
+              .map((x) => `<option value="${x.id}">${x.label}</option>`) 
+              .join("");
+            if (selectedIndustry) industrySelect.value = selectedIndustry;
+            industrySelect.addEventListener("change", () => {
+              selectedIndustry = industrySelect.value;
+              fetchAndApplyPreset();
+              showStep(2);
+            });
+          }
+          if (usecaseSelect) {
+            usecaseSelect.innerHTML = (useCaseOptionsMeta || [])
+              .map((x) => `<option value="${x.id}">${x.label}</option>`) 
+              .join("");
+            if (selectedUseCase) usecaseSelect.value = selectedUseCase;
+            usecaseSelect.addEventListener("change", () => {
+              selectedUseCase = usecaseSelect.value;
+              fetchAndApplyPreset();
+              showStep(3);
+            });
+          }
+          fetchAndApplyPreset();
+        } catch (err) {
+          if (businessAgentResult) {
+            businessAgentResult.textContent = JSON.stringify({ error: err.message }, null, 2);
+          }
+        }
+      }
+
+      logoutBtn.addEventListener("click", () => {
+        window.scrizaAuth.clearAuth();
+        window.location.href = "/login";
+      });
+
+      refreshProfileBtn.addEventListener("click", loadProfile);
+      if (refreshUsersBtn) refreshUsersBtn.addEventListener("click", loadUsers);
+      if (refreshTimelineBtn) refreshTimelineBtn.addEventListener("click", loadTimeline);
+      if (userCreateForm) {
+        userCreateForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const submitBtn = userCreateForm.querySelector("button[type='submit']");
+          submitBtn.disabled = true;
+          try {
+            const payload = {
+              email: userCreateForm["create-email"].value.trim(),
+              password: userCreateForm["create-password"].value,
+              first_name: userCreateForm["create-first-name"].value.trim(),
+              last_name: userCreateForm["create-last-name"].value.trim(),
+              company: userCreateForm["create-company"].value.trim() || undefined,
+            };
+            const desiredRole = userCreateForm["create-role"].value;
+            const created = await window.scrizaAuth.authFetch("/api/v1/user/register", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+            let finalRole = created.role;
+            if (desiredRole === "admin" && created?.user_id) {
+              await window.scrizaAuth.authFetch(`/api/v1/admin/users/${created.user_id}`, {
+                method: "PUT",
+                body: JSON.stringify({ role: "admin" }),
+              });
+              finalRole = "admin";
+            }
+            userCreateResult.textContent = JSON.stringify(
+              { status: "success", user_id: created.user_id, role: finalRole },
+              null,
+              2
+            );
+            userCreateForm.reset();
+            loadUsers();
+          } catch (err) {
+            userCreateResult.textContent = JSON.stringify({ error: err.message }, null, 2);
+          } finally {
+            submitBtn.disabled = false;
+          }
+        });
+      }
+
+      if (agentCreateForm) {
+        agentCreateForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const button = agentCreateForm.querySelector("button[type='submit']");
+          button.disabled = true;
+          try {
+            const payload = {
+              name: agentCreateForm["new-agent-name"].value.trim(),
+              agent_id: agentCreateForm["new-agent-identifier"].value.trim() || undefined,
+              persona: {
+                voice_id: agentCreateForm["new-agent-voice"].value.trim() || undefined,
+                locale: agentCreateForm["new-agent-locale"].value.trim() || undefined,
+                tone_override: agentCreateForm["new-agent-tone"].value || undefined,
+              },
+            };
+            if (!payload.persona.voice_id) delete payload.persona.voice_id;
+            if (!payload.persona.locale) delete payload.persona.locale;
+            if (!payload.persona.tone_override) delete payload.persona.tone_override;
+            if (!Object.keys(payload.persona).length) delete payload.persona;
+
+            const response = await window.scrizaAuth.authFetch("/api/v1/agent/sales/agents", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+            agentCreateResult.textContent = JSON.stringify(response, null, 2);
+            agentCreateForm.reset();
+            await loadAgents();
+          } catch (err) {
+            agentCreateResult.textContent = JSON.stringify({ error: err.message }, null, 2);
+          } finally {
+            button.disabled = false;
+          }
+        });
+      }
+
+      if (memoryAgentSelect) {
+        memoryAgentSelect.addEventListener("change", () => {
+          if (memoryAgentSelect.value) {
+            memoryAgentInput.value = memoryAgentSelect.value;
+          }
+        });
+      }
+
+      if (aiStrategyForm) {
+        aiStrategyForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (aiStrategyBtn) aiStrategyBtn.disabled = true;
+          if (aiStrategyResult) aiStrategyResult.textContent = "Drafting strategy…";
+          try {
+            const payload = {
+              purpose: document.getElementById("ai-purpose").value.trim(),
+              buyer_persona: document.getElementById("ai-buyer").value.trim() || undefined,
+              offerings: document.getElementById("ai-offerings").value.trim() || undefined,
+              tone: document.getElementById("ai-tone").value.trim() || undefined,
+              language: document.getElementById("ai-language").value.trim() || undefined,
+            };
+            // Include selected industry/use_case labels for preset overlay in AI draft
+            if (selectedIndustry && selectedUseCase) {
+              payload.industry = idToLabel(industryOptionsMeta, selectedIndustry);
+              payload.use_case = idToLabel(useCaseOptionsMeta, selectedUseCase);
+            }
+            if (!payload.purpose) {
+              throw new Error("Please describe your purpose or context first.");
+            }
+            const response = await window.scrizaAuth.authFetch("/api/v1/agent/sales/strategy/ai_draft", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+            if (aiStrategyResult) {
+              aiStrategyResult.textContent = JSON.stringify(response.strategy, null, 2);
+            }
+            prefillStrategyForm(response.strategy);
+          } catch (err) {
+            if (aiStrategyResult) {
+              aiStrategyResult.textContent = JSON.stringify({ error: err.message }, null, 2);
+            }
+          } finally {
+            if (aiStrategyBtn) aiStrategyBtn.disabled = false;
+          }
+        });
+      }
+
+      if (agentCompleteForm) {
+        const createBtn = document.getElementById("create-agent-btn");
+        const validate = () => {
+          const ok = (agentNameEl?.value?.trim().length || 0) > 0 && (agentGoalEl?.value?.trim().length || 0) > 0;
+          if (createBtn) createBtn.disabled = !ok;
+          if (agentNameCount) agentNameCount.textContent = `${agentNameEl.value.length}/50`;
+        };
+        agentNameEl?.addEventListener("input", validate);
+        agentGoalEl?.addEventListener("input", validate);
+        validate();
+        agentCompleteForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (!selectedIndustry || !selectedUseCase) {
+            businessAgentResult.textContent = JSON.stringify({ error: "Select industry and use case first." }, null, 2);
+            return;
+          }
+          const button = agentCompleteForm.querySelector("button[type='submit']");
+          button.disabled = true;
+          businessAgentResult.textContent = "Creating agent…";
+          try {
+            const payload = {
+              industry: selectedIndustry,
+              use_case: selectedUseCase,
+              name: agentNameEl.value.trim(),
+              main_goal: agentGoalEl.value.trim(),
+              website_url: agentWebsiteEl.value.trim() || undefined,
+              ai_generate: true,
+              chat_only: !!(chatOnlyEl && chatOnlyEl.checked),
+            };
+            if (!payload.name || !payload.main_goal) {
+              throw new Error("Agent name and primary goal are required.");
+            }
+            const response = await window.scrizaAuth.authFetch("/api/v1/agent/sales/agents/business", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+            businessAgentResult.textContent = JSON.stringify(response, null, 2);
+            prefillStrategyForm(response.strategy);
+            await loadAgents();
+          } catch (err) {
+            businessAgentResult.textContent = JSON.stringify({ error: err.message }, null, 2);
+          } finally {
+            button.disabled = false;
+          }
+        });
+      }
+
+      // Wizard back buttons
+      wiz1Back?.addEventListener("click", ()=>activatePanel('overview'));
+      wiz2Back?.addEventListener("click", ()=>showStep(1));
+      wiz3Back?.addEventListener("click", ()=>showStep(2));
+
+      if (launchOpsBtn) {
+        launchOpsBtn.addEventListener("click", (event) => {
+          event.preventDefault();
+          const auth = window.scrizaAuth.getAuth();
+          if (!auth) {
+            alert("Please log in again to access the Ops console.");
+            return;
+          }
+          const opsWindow = window.open("", "_blank");
+          if (!opsWindow) {
+            alert("Popup blocked. Allow popups for this site to view the Ops console.");
+            return;
+          }
+          try {
+            opsWindow.localStorage.setItem("scrizaAuth", JSON.stringify(auth));
+          } catch (err) {
+            console.warn("Unable to write auth to new window", err);
+          }
+          opsWindow.location.href = "/ops";
+        });
+      }
+
+      // Strategy form
+      document.getElementById("strategy-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = event.target.querySelector("button[type='submit']");
+        button.disabled = true;
+        try {
+          const basePayload = {
+            title: event.target["strategy-title"].value,
+            description: event.target["strategy-description"].value,
+            goals: (event.target["strategy-goals"].value || "")
+              .split(",")
+              .map((g) => g.trim())
+              .filter(Boolean),
+            persona: {
+              name: event.target["strategy-persona"].value || undefined,
+              tone_override: event.target["strategy-tone"].value || undefined,
+            },
+          };
+          const advanced = event.target["strategy-json"].value.trim();
+          let payload = basePayload;
+          if (advanced) {
+            try {
+              const json = JSON.parse(advanced);
+              payload = { ...payload, ...json };
+            } catch (err) {
+              throw new Error("Invalid JSON in advanced payload");
+            }
+          }
+          const response = await window.scrizaAuth.authFetch("/api/v1/agent/sales/ingest_strategy", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          document.getElementById("strategy-result").textContent = JSON.stringify(response, null, 2);
+        } catch (err) {
+          document.getElementById("strategy-result").textContent = JSON.stringify({ error: err.message }, null, 2);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      // Call form
+      document.getElementById("call-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = event.target.querySelector("button[type='submit']");
+        button.disabled = true;
+        try {
+          const payload = {
+            lead_name: event.target["call-lead-name"].value,
+            lead_phone: event.target["call-lead-phone"].value,
+          };
+          let agentId = callAgentSelect ? (callAgentSelect.value || "").trim() : "";
+          if (!agentId && selectedAgentId) agentId = selectedAgentId;
+          if (agentId) payload.agent_id = agentId;
+          const response = await window.scrizaAuth.authFetch("/api/v1/agent/sales/start_call", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          document.getElementById("call-result").textContent = JSON.stringify(response, null, 2);
+        } catch (err) {
+          document.getElementById("call-result").textContent = JSON.stringify({ error: err.message }, null, 2);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      // Voice form
+      document.getElementById("voice-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = event.target.querySelector("button[type='submit']");
+        button.disabled = true;
+        const audioEl = document.getElementById("voice-audio");
+        try {
+          const payload = {
+            text: event.target["voice-text"].value,
+            agent_id: "sales-agent",
+          };
+          const voiceId = event.target["voice-id"].value.trim();
+          if (voiceId) payload.voice_id = voiceId;
+          const response = await window.scrizaAuth.authFetch("/api/v1/agent/sales/synthesize_voice", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          document.getElementById("voice-result").textContent = JSON.stringify(response, null, 2);
+          if (response.audio_base64) {
+            audioEl.src = `data:audio/mpeg;base64,${response.audio_base64}`;
+            audioEl.style.display = "block";
+          }
+        } catch (err) {
+          document.getElementById("voice-result").textContent = JSON.stringify({ error: err.message }, null, 2);
+          audioEl.style.display = "none";
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      // Memory form
+      document.getElementById("memory-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = event.target.querySelector("button[type='submit']");
+        button.disabled = true;
+        try {
+          const agentId = event.target["memory-agent"].value.trim();
+          const response = await window.scrizaAuth.authFetch(`/api/v1/memory/list/${agentId}`);
+          document.getElementById("memory-result").textContent = JSON.stringify(response, null, 2);
+        } catch (err) {
+          document.getElementById("memory-result").textContent = JSON.stringify({ error: err.message }, null, 2);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      document.getElementById("memory-clear").addEventListener("click", async () => {
+        if (!confirm("Permanently delete this agent's memory?")) return;
+        try {
+          const agentId = document.getElementById("memory-agent").value.trim();
+          await window.scrizaAuth.authFetch(`/api/v1/memory/delete/${agentId}`, { method: "DELETE" });
+          document.getElementById("memory-result").textContent = JSON.stringify({ status: "cleared" }, null, 2);
+        } catch (err) {
+          document.getElementById("memory-result").textContent = JSON.stringify({ error: err.message }, null, 2);
+        }
+      });
+
+      (function initialise() {
+        const auth = window.scrizaAuth.getAuth();
+        if (!auth) {
+          window.location.href = "/login";
+          return;
+        }
+        updateTokenDisplay(auth);
+        loadProfile();
+        if (auth.payload?.role !== "admin") {
+          document.querySelectorAll(".admin-only").forEach((el) => el.style.display = "none");
+          const opsPanel = document.getElementById("panel-ops");
+          if (opsPanel) opsPanel.remove();
+          const usersPanel = document.getElementById("panel-users");
+          if (usersPanel) usersPanel.remove();
+        } else {
+          loadUsers();
+          loadTimeline();
+        }
+        loadAgents();
+        if (agentSearchInput) agentSearchInput.addEventListener('input', ()=>renderAgentsTable(agentSearchInput.value));
+        btnNewAgent?.addEventListener('click', ()=>{ showStep(1); });
+        btnOpenStrategy?.addEventListener('click', ()=>{
+          if (!selectedAgentId) return;
+          // open Strategy Studio with selected agent
+          const stratSelect = document.getElementById('strategy-agent-select');
+          if (stratSelect) stratSelect.value = selectedAgentId;
+          activatePanel('strategy');
+        });
+        loadBusinessMetadata();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scriza Admin Login</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <div class="card" style="background:rgba(15,23,42,0.92);border:1px solid rgba(59,130,246,0.3);border-radius:16px;padding:36px;width:min(420px,92%);box-shadow:0 30px 80px rgba(30,64,175,0.45);margin:auto;margin-top:10vh;">
+      <h1>Admin Control Login</h1>
+      <p>Authenticate with an admin user to access the Scriza Ops console.</p>
+      <form id="admin-login-form">
+        <label for="email">Admin Email</label>
+        <input id="email" name="email" type="email" required placeholder="admin@example.com" />
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required placeholder="••••••••" />
+
+        <button id="submit-btn" type="submit">Authenticate</button>
+      </form>
+      <div class="hint">
+        Successful authentication returns the JWT payload from <code>/api/v1/user/login</code>. Ensure the user has the <code>admin</code> role before hitting the Ops routes.
+      </div>
+      <pre id="result">{}</pre>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script>
+      const form = document.getElementById("admin-login-form");
+      const submitBtn = document.getElementById("submit-btn");
+      const output = document.getElementById("result");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submitBtn.disabled = true;
+        output.textContent = "Authenticating…";
+
+        const payload = {
+          email: event.target.email.value.trim(),
+          password: event.target.password.value,
+        };
+
+        try {
+          const response = await fetch("/api/v1/user/login", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.detail || data.message || "Login failed");
+          }
+          const auth = window.scrizaAuth.setAuth(data.access_token);
+          output.textContent = JSON.stringify({ status: "success", role: auth.payload?.role }, null, 2);
+          setTimeout(() => {
+            window.location.href = "/dashboard";
+          }, 400);
+        } catch (error) {
+          output.textContent = JSON.stringify({ error: String(error) }, null, 2);
+        } finally {
+          submitBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

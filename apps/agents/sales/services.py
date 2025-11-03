@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
 import json
 import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 from pathlib import Path
+import hashlib
+import os
 
 import httpx
 from fastapi import HTTPException, status
@@ -17,6 +18,7 @@ from twilio.rest import Client
 
 from core.config import settings
 from core.database import get_collection
+from apps.agents.llm_client import complete_chat, stream_chat_completion
 from shared.constants import (
     COLLECTION_STRATEGIES,
     COLLECTION_CALLS,
@@ -153,148 +155,57 @@ async def call_openai_chat(
     temperature: float = 0.7,
     on_token: TokenCallback = None,
 ) -> str:
-    """Invoke GPT-4o chat completions with persona injection and optional token streaming."""
-    if not settings.OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="OpenAI API key not configured",
+    """Invoke GPT chat completions using the shared Async client.
+
+    Deduplicated persona injection: pass persona/goals to llm_client, no pre-injection here.
+    Default model selection: critical (streaming/in-call) uses OPENAI_MODEL_CRITICAL; others use OPENAI_MODEL_CHEAP.
+    """
+    # Choose default model if not explicitly provided
+    if model is None:
+        target_model = (
+            settings.OPENAI_MODEL_CRITICAL if stream else settings.OPENAI_MODEL_CHEAP
         )
-
-    model = model or settings.OPENAI_MODEL
-    headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    augmented_messages = _inject_persona_context(messages, persona=persona, goals=goals)
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": augmented_messages,
-        "temperature": temperature,
-    }
+    else:
+        target_model = model
     if stream:
-        payload["stream"] = True
-
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            if stream:
-                data_text = await _stream_chat_completion(
-                    client,
-                    headers=headers,
-                    payload=payload,
-                    on_token=on_token,
-                )
-                return data_text
-
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
+        stream_state = await stream_chat_completion(
+            messages,
+            model=target_model,
+            persona=persona,
+            goals=goals,
+            temperature=temperature,
+        )
+        if on_token:
+            while True:
+                token = await stream_state.queue.get()
+                if token is None:
+                    break
+                await on_token(token)
+        await stream_state.finished_event.wait()
+        if stream_state.error:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=stream_state.error,
             )
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=f"OpenAI request failed: {exc.response.text}",
-        ) from exc
+        return stream_state.text()
 
-    choices = data.get("choices", [])
-    if not choices:
+    response = await complete_chat(
+        messages,
+        model=target_model,
+        persona=persona,
+        goals=goals,
+        temperature=temperature,
+    )
+    try:
+        return response["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="OpenAI did not return any choices",
+            detail="Malformed OpenAI response",
         )
 
-    content = choices[0]["message"]["content"].strip()
-    if on_token:
-        await _invoke_callback(on_token, content)
-    return content
 
-
-def _inject_persona_context(
-    messages: List[Dict[str, str]],
-    *,
-    persona: Optional[Dict[str, Any]],
-    goals: Optional[Sequence[str]],
-) -> List[Dict[str, str]]:
-    """Augment the first system message with persona and goal descriptors."""
-    if not persona and not goals:
-        return list(messages)
-
-    persona_lines: List[str] = []
-    if persona:
-        name = persona.get("name")
-        tone = persona.get("tone")
-        description = persona.get("description")
-        if name:
-            persona_lines.append(f"Persona Name: {name}")
-        if tone:
-            persona_lines.append(f"Desired tone: {tone}")
-        if description:
-            persona_lines.append(description)
-        voice = persona.get("voice_id")
-        if voice:
-            persona_lines.append(f"Voice preference: {voice}")
-    if goals:
-        persona_lines.append("Goals: " + "; ".join(goals))
-
-    if not persona_lines:
-        return list(messages)
-
-    injected_block = "\n".join(persona_lines)
-    if messages and messages[0].get("role") == "system":
-        merged = messages[0].copy()
-        merged["content"] = f"{merged['content']}\n{injected_block}"
-        return [merged] + [msg.copy() for msg in messages[1:]]
-
-    return [{"role": "system", "content": injected_block}] + [msg.copy() for msg in messages]
-
-
-async def _stream_chat_completion(
-    client: httpx.AsyncClient,
-    *,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
-    on_token: TokenCallback = None,
-) -> str:
-    """Stream GPT-4o deltas, yielding tokens to the provided callback."""
-    url = "https://api.openai.com/v1/chat/completions"
-    collected: List[str] = []
-    async with client.stream("POST", url, headers=headers, json=payload) as response:
-        response.raise_for_status()
-        async for line in response.aiter_lines():
-            if not line:
-                continue
-            if line.startswith("data: "):
-                data_str = line[6:]
-                if data_str.strip() == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                deltas = chunk.get("choices", [])
-                if not deltas:
-                    continue
-                delta = deltas[0].get("delta", {})
-                if not delta:
-                    continue
-                content_piece = delta.get("content")
-                if content_piece:
-                    collected.append(content_piece)
-                    if on_token:
-                        await _invoke_callback(on_token, content_piece)
-    return "".join(collected).strip()
-
-
-async def _invoke_callback(callback: TokenCallback, token: str) -> None:
-    """Safely await token callbacks without propagating exceptions."""
-    try:
-        result = callback(token)
-        if inspect.isawaitable(result):
-            await result
-    except Exception:  # pragma: no cover - callback safety
-        pass
+# Note: persona injection is handled centrally by apps.agents.llm_client
 
 
 async def generate_strategy_context(strategy_payload: Dict[str, Any]) -> str:
@@ -351,7 +262,24 @@ async def generate_strategy_context(strategy_payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def synthesise_elevenlabs_voice(text: str, voice_id: Optional[str]) -> Dict[str, Any]:
+def _tone_to_voice_settings(tone: Optional[str]) -> Dict[str, float]:
+    tone = (tone or "").lower()
+    profiles = {
+        "friendly": {"stability": 0.55, "similarity_boost": 0.92},
+        "empathetic": {"stability": 0.6, "similarity_boost": 0.88},
+        "assertive": {"stability": 0.35, "similarity_boost": 0.75},
+        "humorous": {"stability": 0.45, "similarity_boost": 0.9},
+    }
+    return profiles.get(tone, {"stability": 0.4, "similarity_boost": 0.8})
+
+
+async def synthesise_elevenlabs_voice(
+    text: str,
+    voice_id: Optional[str],
+    *,
+    tone_hint: Optional[str] = None,
+    locale: Optional[str] = None,
+) -> Dict[str, Any]:
     """Call ElevenLabs text-to-speech API and return metadata."""
     if not settings.ELEVENLABS_API_KEY:
         raise HTTPException(
@@ -375,31 +303,88 @@ async def synthesise_elevenlabs_voice(text: str, voice_id: Optional[str]) -> Dic
     payload = {
         "text": text,
         "model_id": settings.ELEVENLABS_MODEL or "eleven_monolingual_v1",
-        "voice_settings": {"stability": 0.4, "similarity_boost": 0.8},
+        "voice_settings": _tone_to_voice_settings(tone_hint),
     }
+    if locale:
+        payload["language"] = locale
 
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            audio_bytes = response.content
-    except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-        message = exc.response.text or exc.response.reason_phrase
-        if status_code == 404:
-            detail = (
-                f"ElevenLabs voice '{voice_id}' not found. Use a valid voice_id or update ELEVENLABS_DEFAULT_VOICE_ID."
-            )
-        elif status_code == 401:
-            detail = "ElevenLabs authentication failed. Check ELEVENLABS_API_KEY."
-        else:
-            detail = f"ElevenLabs request failed ({status_code}): {message}"
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+    # Simple disk cache keyed by text+voice+model+tone+locale
+    audio_bytes: Optional[bytes] = None
+    cache_hit = False
+    cache_dir = Path(settings.TTS_CACHE_DIR)
+    if settings.TTS_CACHE_ENABLED:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            cache_material = {
+                "text": text,
+                "voice_id": voice_id,
+                "model": settings.ELEVENLABS_MODEL or "eleven_monolingual_v1",
+                "tone": tone_hint,
+                "locale": locale,
+            }
+            key = hashlib.sha256(json.dumps(cache_material, sort_keys=True).encode("utf-8")).hexdigest()
+            voice_folder = cache_dir / (voice_id or "default")
+            voice_folder.mkdir(parents=True, exist_ok=True)
+            cache_path = voice_folder / f"{key}.mp3"
+            if cache_path.exists():
+                audio_bytes = cache_path.read_bytes()
+                cache_hit = True
+        except Exception:
+            audio_bytes = None
+            cache_hit = False
+
+    if audio_bytes is None:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                audio_bytes = response.content
+            # Save to cache
+            if settings.TTS_CACHE_ENABLED:
+                try:
+                    if 'cache_path' not in locals():
+                        # compute path if not computed above due to exception
+                        cache_material = {
+                            "text": text,
+                            "voice_id": voice_id,
+                            "model": settings.ELEVENLABS_MODEL or "eleven_monolingual_v1",
+                            "tone": tone_hint,
+                            "locale": locale,
+                        }
+                        key = hashlib.sha256(json.dumps(cache_material, sort_keys=True).encode("utf-8")).hexdigest()
+                        voice_folder = cache_dir / (voice_id or "default")
+                        voice_folder.mkdir(parents=True, exist_ok=True)
+                        cache_path = voice_folder / f"{key}.mp3"
+                    cache_path.write_bytes(audio_bytes)
+                except Exception:
+                    pass
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            message = exc.response.text or exc.response.reason_phrase
+            if status_code == 404:
+                detail = (
+                    f"ElevenLabs voice '{voice_id}' not found. Use a valid voice_id or update ELEVENLABS_DEFAULT_VOICE_ID."
+                )
+            elif status_code == 401:
+                detail = "ElevenLabs authentication failed. Check ELEVENLABS_API_KEY."
+            else:
+                detail = f"ElevenLabs request failed ({status_code}): {message}"
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
     duration = max(len(text.split()) * 0.4, 1.0)
 
-    return {"audio_base64": audio_base64, "duration": duration}
+    result = {"audio_base64": audio_base64, "duration": duration}
+    if settings.TTS_CACHE_ENABLED:
+        result["cache_hit"] = cache_hit
+        try:
+            result["cache_path"] = str(cache_path)
+        except Exception:
+            pass
+    return result
 
 
 async def list_elevenlabs_voices() -> List[Dict[str, Any]]:
@@ -499,6 +484,9 @@ async def save_call_record(
         "key_phrases": key_phrases,
         "failure_reason": failure_reason,
         "audio_urls": audio_urls or [],
+        # Usage metrics
+        "tokens_used": 0,
+        "duration_seconds": 0.0,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }

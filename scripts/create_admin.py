@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from core.config import settings
 from apps.users.models import UserRole
 from passlib.context import CryptContext
+from urllib.parse import urlparse, urlunparse
 
 # Password hashing
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
@@ -19,12 +20,22 @@ def get_password_hash(password):
 async def create_admin_user():
     """Create an admin user"""
     try:
-        # Connect to MongoDB
-        client = AsyncIOMotorClient(settings.MONGODB_URL)
+        # Connect to MongoDB (fast-fail + localhost fallback)
+        uri = settings.MONGODB_URL
+        client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
+        try:
+            await client.admin.command("ping")
+        except Exception:
+            parsed = urlparse(uri)
+            if parsed.hostname == "mongodb":
+                fallback = parsed._replace(netloc=f"localhost:{parsed.port or 27017}")
+                fallback_uri = urlunparse(fallback)
+                client = AsyncIOMotorClient(fallback_uri, serverSelectionTimeoutMS=4000)
+                await client.admin.command("ping")
         db = client[settings.DATABASE_NAME]
         
         # Check if admin already exists
-        existing_admin = await db.users.find_one({"email": "karnveer@scriza.in"})
+        existing_admin = await db.users.find_one({"email": "karnveer@scriza.co"})
         if existing_admin:
             print("Admin user already exists!")
             return
@@ -32,7 +43,7 @@ async def create_admin_user():
         # Create admin user
         admin_user = {
             "user_id": str(uuid.uuid4()),
-            "email": "karnveer@scriza.in",
+            "email": "karnveer@scriza.co",
             "hashed_password": get_password_hash("admin123"),
             "first_name": "System",
             "last_name": "Administrator",
@@ -47,7 +58,7 @@ async def create_admin_user():
         result = await db.users.insert_one(admin_user)
         
         print("Admin user created successfully!")
-        print("Email: karnveer@scriza.in")
+        print("Email: karnveer@scriza.co")
         print("Password: admin123")
         print("Role: Admin")
         
