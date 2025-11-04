@@ -54,6 +54,9 @@ class Settings:
     ASR_MIN_RMS: int = int(os.getenv("ASR_MIN_RMS", "350"))
     ASR_MIN_UTTERANCE_MS: int = int(os.getenv("ASR_MIN_UTTERANCE_MS", "1200"))
     ASR_MAX_SILENCE_MS: int = int(os.getenv("ASR_MAX_SILENCE_MS", "600"))
+    # OpenAI ASR (Whisper API) settings
+    ASR_OPENAI_MODEL: str = os.getenv("ASR_OPENAI_MODEL", "whisper-large-v3")
+    ASR_OPENAI_TIMEOUT_MS: int = int(os.getenv("ASR_OPENAI_TIMEOUT_MS", "15000"))
     
     # Twilio settings
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")

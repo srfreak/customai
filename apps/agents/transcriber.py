@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass, field
 import numpy as np  # type: ignore
 from typing import AsyncIterator, Callable, List, Optional, Tuple
+import io
+import wave
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,58 @@ class StubBackend(TranscriptionBackend):
         return TranscriptionChunk(text="", language=language)
 
 
+class OpenAIWhisperBackend(TranscriptionBackend):
+    """OpenAI Whisper/Transcribe API backend.
+
+    Sends per‑utterance PCM to OpenAI's `/v1/audio/transcriptions` endpoint.
+    """
+
+    def __init__(self, model_name: Optional[str] = None, timeout_ms: Optional[int] = None) -> None:
+        from core.config import settings
+        from openai import OpenAI  # lazy import
+
+        self.model_name = model_name or getattr(settings, "ASR_OPENAI_MODEL", "whisper-large-v3")
+        self.timeout_s = float((timeout_ms or getattr(settings, "ASR_OPENAI_TIMEOUT_MS", 15000)) / 1000.0)
+        # Create client once; the SDK manages sessions internally
+        self._client = OpenAI(api_key=getattr(settings, "OPENAI_API_KEY", ""))
+
+    def _pcm16_to_wav_bytes(self, pcm16: bytes, sample_rate: int) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm16)
+        return buf.getvalue()
+
+    async def transcribe(
+        self,
+        pcm16: bytes,
+        sample_rate: int,
+        language: Optional[str] = None,
+    ) -> TranscriptionChunk:
+        wav_bytes = self._pcm16_to_wav_bytes(pcm16, sample_rate)
+
+        def _run() -> str:
+            # The Python SDK accepts (filename, bytes, mime) tuple
+            file_tuple = ("audio.wav", wav_bytes, "audio/wav")
+            resp = self._client.audio.transcriptions.create(  # type: ignore[attr-defined]
+                model=self.model_name,
+                file=file_tuple,
+                language=language,
+                timeout=self.timeout_s,
+            )
+            # SDK returns object with `text`
+            return getattr(resp, "text", "") or ""
+
+        try:
+            text = await asyncio.to_thread(_run)
+        except Exception as exc:  # pragma: no cover - resilience
+            logger.exception("OpenAI ASR failure: %s", exc)
+            return TranscriptionChunk(text="", language=language)
+        return TranscriptionChunk(text=text.strip(), language=language)
+
+
 @dataclass
 class TranscriberConfig:
     backend: str = "faster-whisper"
@@ -186,6 +240,7 @@ class StreamingTranscriber:
         lookup = {
             "faster-whisper": FasterWhisperBackend,
             "whispercpp": WhisperCppBackend,
+            "openai-whisper": OpenAIWhisperBackend,
             "stub": StubBackend,
         }
         factory = lookup.get(backend.lower())
