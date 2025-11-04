@@ -708,6 +708,7 @@ class BaseAgent(ABC):
         return "\n".join(persona_parts)
 
     def _summarize_strategy(self, strategy: Optional[Dict[str, Any]]) -> Optional[str]:
+<<<<<<< HEAD
         """Derive a compact textual summary for LLM grounding from the strategy payload.
 
         Includes scripts (greeting/pitch/faqs/objections/closing) and, when available,
@@ -762,6 +763,10 @@ class BaseAgent(ABC):
             if voice_hint:
                 lines.append(f"Preferred Voice ID: {voice_hint}")
         return "\n".join(lines) if lines else None
+=======
+        from shared.strategy_utils import summarize_strategy_payload
+        return summarize_strategy_payload(strategy)
+>>>>>>> c987d10 (bit changes)
 
     async def _bootstrap_subagents_from_payload(self, strategy_payload: Dict[str, Any]) -> None:
         """Automatically instantiate subagents declared in the strategy."""

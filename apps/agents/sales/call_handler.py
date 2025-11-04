@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from apps.agents.sales import services
+from apps.integrations.telephony.twilio import twilio_service
+from apps.memory.memory_manager import memory_service
 from apps.agents.sales.agent import SalesAgent
 from core.auth import RoleChecker
 from core.config import settings
@@ -53,34 +55,7 @@ class StartCallResponse(BaseModel):
     audio_urls: List[str] = Field(default_factory=list)
 
 
-async def _persist_memory(
-    user_id: str,
-    agent_id: Optional[str],
-    call_id: str,
-    conversation: List[ConversationTurn],
-) -> None:
-    memory_collection = get_collection(COLLECTION_MEMORY_LOGS)
-    entry = {
-        "memory_id": f"call-{call_id}",
-        "user_id": user_id,
-        "agent_id": agent_id,
-        "data": {
-            "type": "call_conversation",
-            "call_id": call_id,
-            "conversation": [turn.dict() for turn in conversation],
-        },
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-    }
-    await memory_collection.insert_one(entry)
-    logger.info(
-        "Persisted conversation transcript",
-        extra={
-            "call_id": call_id,
-            "turns": len(conversation),
-            "agent_id": agent_id,
-        },
-    )
+# Use MemoryService for all memory writes
 
 
 def _extract_key_phrases(conversation: List[ConversationTurn]) -> List[str]:
@@ -149,11 +124,12 @@ async def start_call(
     )
 
     try:
-        client = services.get_twilio_client()
-        call_meta = await services.create_twilio_call(
-            client=client,
-            to_phone=request.lead_phone,
-            greeting=greeting,
+        # Prefer centralized Twilio service
+        call_meta = await twilio_service.make_call(
+            to_number=request.lead_phone,
+            from_number=settings.TWILIO_PHONE_NUMBER,
+            agent_id=agent_identifier,
+            callback_url=settings.API_BASE_URL or None,
         )
         twilio_call_sid = call_meta.get("sid")
         call_status = call_meta.get("status", CALL_STATUS_IN_PROGRESS)
@@ -267,12 +243,19 @@ async def start_call(
         except Exception as update_exc:  # pragma: no cover
             logger.exception("Failed to enqueue audio playback on Twilio call: %s", update_exc)
 
-    await _persist_memory(
-        user_id=user["user_id"],
-        agent_id=agent_identifier,
-        call_id=call_id,
-        conversation=conversation,
-    )
+    # Persist via MemoryService
+    try:
+        await memory_service.store_memory(
+            user_id=user["user_id"],
+            agent_id=agent_identifier or "",
+            data={
+                "type": "call_conversation",
+                "call_id": call_id,
+                "conversation": [turn.dict() for turn in conversation],
+            },
+        )
+    except Exception:
+        logger.info("Non-fatal: failed to store call transcript into memory service", exc_info=True)
 
     logger.info(
         "start_call completed",
