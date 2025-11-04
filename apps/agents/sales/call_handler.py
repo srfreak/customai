@@ -124,14 +124,16 @@ async def start_call(
     )
 
     try:
-        # Prefer centralized Twilio service
+        # Prefer centralized Twilio service. Do NOT pass callback_url here so the
+        # service constructs the correct API path: /api/v1/integrations/telephony/twilio/voice
         call_meta = await twilio_service.make_call(
             to_number=request.lead_phone,
             from_number=settings.TWILIO_PHONE_NUMBER,
             agent_id=agent_identifier,
-            callback_url=settings.API_BASE_URL or None,
+            callback_url=None,
         )
-        twilio_call_sid = call_meta.get("sid")
+        # Accept either key name from different creators
+        twilio_call_sid = call_meta.get("call_sid") or call_meta.get("sid")
         call_status = call_meta.get("status", CALL_STATUS_IN_PROGRESS)
         if call_meta.get("error"):
             failure_reason = call_meta.get("error")
