@@ -148,6 +148,36 @@ async def start_call(
         if twilio_call_sid:
             sales_agent.conversation_id = twilio_call_sid
             call_reference = twilio_call_sid
+            # Ensure a call record exists before WS connects so the loader
+            # can fetch strategy/persona by callSid immediately.
+            try:
+                calls_collection = get_collection(COLLECTION_CALLS)
+                now = datetime.utcnow()
+                await calls_collection.update_one(
+                    {"call_id": twilio_call_sid},
+                    {
+                        "$setOnInsert": {
+                            "call_id": twilio_call_sid,
+                            "user_id": user["user_id"],
+                            "agent_id": agent_identifier,
+                            "lead_name": request.lead_name,
+                            "lead_phone": request.lead_phone,
+                            "status": CALL_STATUS_IN_PROGRESS,
+                            "lead_status": "pending",
+                            "conversation": [],
+                            "key_phrases": [],
+                            "failure_reason": None,
+                            "audio_urls": [],
+                            "tokens_used": 0,
+                            "duration_seconds": 0.0,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                    },
+                    upsert=True,
+                )
+            except Exception:
+                logger.info("Non-fatal: failed to precreate call record for WS loader", exc_info=True)
     except TelephonyException as exc:
         call_status = CALL_STATUS_FAILED
         failure_reason = str(exc)
