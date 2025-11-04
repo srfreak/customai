@@ -18,3 +18,4 @@ redis==5.0.8
 aiofiles
 faster-whisper
 onnxruntime
+numpy-2.0.2
