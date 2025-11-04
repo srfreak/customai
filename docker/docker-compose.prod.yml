@@ -1,24 +1,43 @@
-version: "3.8"
+version: '3.8'
 
 services:
   scriza-api:
-    image: ghcr.io/srfreak/customai:${IMAGE_TAG:-latest}
-    restart: always
-    env_file:
-      - /srv/customai/.env
+
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - DATABASE_NAME=scriza_db
+      - SECRET_KEY=your-secret-key-here
     depends_on:
       - mongodb
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    networks:
+      - scriza-network
+
+    api:
+      image: registry.gitlab.com/srfreak/customai:${CI_COMMIT_SHA}
+      restart: always
+      env_file:
+        - /srv/customai/.env   # contains secrets
+      ports:
+        - "8000:8000"
 
   mongodb:
     image: mongo:4.4
-    restart: always
     ports:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+    networks:
+      - scriza-network
 
 volumes:
   mongodb_data:
+    name: scriza-mongo-data
+
+networks:
+  scriza-network:
+    driver: bridge
