@@ -122,7 +122,6 @@ def _inject_persona_context(
     """Augment the first system message with persona and goal descriptors."""
     if not persona and not goals:
         return list(messages)
-
     persona_lines: List[str] = []
     if persona:
         name = persona.get("name")
