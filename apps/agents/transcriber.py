@@ -4,6 +4,7 @@ import asyncio
 import audioop
 import logging
 from dataclasses import dataclass, field
+import numpy as np  # type: ignore
 from typing import AsyncIterator, Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,15 @@ class FasterWhisperBackend(TranscriptionBackend):
             raise RuntimeError("faster-whisper backend unavailable")
 
         def _run() -> Tuple[str, Optional[float]]:
+            # Convert raw PCM16 (little-endian) to float32 numpy array in [-1.0, 1.0]
+            try:
+                audio_np = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
+            except Exception:
+                # As a defensive fallback, pass through and let backend handle
+                audio_np = pcm16  # type: ignore[assignment]
+
             segments, info = self._model.transcribe(  # type: ignore[attr-defined]
-                audio=pcm16,
+                audio=audio_np,
                 language=language,
                 beam_size=1,
                 temperature=0,
