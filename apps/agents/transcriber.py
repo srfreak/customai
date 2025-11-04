@@ -68,7 +68,7 @@ class FasterWhisperBackend(TranscriptionBackend):
         if not self._model:
             raise RuntimeError("faster-whisper backend unavailable")
 
-        async def _run() -> Tuple[str, Optional[float]]:
+        def _run() -> Tuple[str, Optional[float]]:
             segments, info = self._model.transcribe(  # type: ignore[attr-defined]
                 audio=pcm16,
                 language=language,
@@ -80,12 +80,13 @@ class FasterWhisperBackend(TranscriptionBackend):
             text_parts: List[str] = []
             confidence = None
             for segment in segments:
-                text_parts.append(segment.text)
+                text_parts.append(getattr(segment, "text", ""))
+                # Not all builds expose avg_log_prob; ignore if absent
                 try:
-                    confidence = segment.avg_log_prob
-                except AttributeError:
+                    confidence = getattr(segment, "avg_log_prob", None)
+                except Exception:
                     confidence = None
-            return " ".join(text_parts).strip(), confidence
+            return " ".join(tp for tp in text_parts if tp).strip(), confidence
 
         text, confidence = await asyncio.to_thread(_run)
         return TranscriptionChunk(text=text, language=language, confidence=confidence)
