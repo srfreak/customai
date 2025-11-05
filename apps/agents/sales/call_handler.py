@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
+from bson import ObjectId
 
 from apps.agents.sales import services
 from apps.integrations.telephony.twilio import twilio_service
@@ -16,6 +18,7 @@ from core.config import settings
 from core.database import get_collection
 from shared.constants import (
     COLLECTION_MEMORY_LOGS,
+    COLLECTION_CALLS,
     CALL_STATUS_COMPLETED,
     CALL_STATUS_FAILED,
     CALL_STATUS_IN_PROGRESS,
@@ -26,6 +29,61 @@ from utils.excel_logger import log_call_summary
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_evaluation(status: Optional[str], lead_status: Optional[str]) -> str:
+    status_normalised = (status or "").lower()
+    lead_status_normalised = (lead_status or "").lower()
+    if status_normalised == "completed":
+        return "Successful"
+    if status_normalised in {"in_progress", "ringing", "queued"}:
+        return "Live"
+    if lead_status_normalised in {"no_answer", "busy", "cancelled"}:
+        return "No answer"
+    return "Error"
+
+
+@router.post("/calls/backfill")
+async def backfill_stale_calls(
+    max_age_minutes: int = Query(15, ge=1, le=1440),
+    user: dict = Depends(RoleChecker(["admin"]))
+):
+    """Mark stale in-progress calls as no_answer/failed.
+
+    A call is considered stale when:
+    - status in {in_progress, initiated, ringing}
+    - conversation missing or empty
+    - updated_at (or created_at) older than now - max_age_minutes
+    """
+    now = datetime.utcnow()
+    threshold = now - timedelta(minutes=max_age_minutes)
+    calls = get_collection(COLLECTION_CALLS)
+    criteria = {
+        "status": {"$in": ["in_progress", "initiated", "ringing"]},
+        "$and": [
+            {"$or": [{"conversation": {"$exists": False}}, {"conversation": {"$size": 0}}]},
+            {"$or": [
+                {"updated_at": {"$lt": threshold}},
+                {"updated_at": {"$exists": False}, "created_at": {"$lt": threshold}},
+            ]},
+        ],
+    }
+    update = {
+        "$set": {
+            "status": "failed",
+            "lead_status": "no_answer",
+            "updated_at": now,
+        }
+    }
+    try:
+        result = await calls.update_many(criteria, update)
+        return {
+            "matched": getattr(result, "matched_count", 0),
+            "modified": getattr(result, "modified_count", 0),
+            "cutoff": threshold.isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backfill failed: {exc}")
 
 
 class ConversationTurn(BaseModel):
@@ -377,10 +435,101 @@ async def get_call_status(
         
         return {
             "status": "success",
-            "call_data": call_record
+            "call_data": jsonable_encoder(call_record, custom_encoder={ObjectId: str})
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get call status: {str(e)}"
         )
+
+
+def _build_call_list_item(doc: Dict[str, Any]) -> Dict[str, Any]:
+    conversation = doc.get("conversation") or []
+    message_count = 0
+    if isinstance(conversation, list):
+        for turn in conversation:
+            if isinstance(turn, dict):
+                if turn.get("lead_input"):
+                    message_count += 1
+                if turn.get("agent_reply"):
+                    message_count += 1
+    started_at = doc.get("created_at")
+    updated_at = doc.get("updated_at")
+    if isinstance(started_at, datetime):
+        started_at_iso = started_at.isoformat()
+    else:
+        started_at_iso = str(started_at) if started_at else None
+    if isinstance(updated_at, datetime):
+        updated_at_iso = updated_at.isoformat()
+    else:
+        updated_at_iso = str(updated_at) if updated_at else None
+
+    status = doc.get("status")
+    lead_status = doc.get("lead_status")
+
+    return {
+        "call_id": doc.get("call_id"),
+        "agent_id": doc.get("agent_id"),
+        "user_id": doc.get("user_id"),
+        "status": status,
+        "lead_status": lead_status,
+        "evaluation": _derive_evaluation(status, lead_status),
+        "started_at": started_at_iso,
+        "updated_at": updated_at_iso,
+        "duration_seconds": float(doc.get("duration_seconds", 0.0) or 0.0),
+        "message_count": message_count,
+        "total_cost": float(doc.get("total_cost", 0.0) or 0.0),
+        "tokens_used": int(doc.get("tokens_used", 0) or 0),
+    }
+
+
+@router.get("/calls")
+async def list_calls(
+    limit: int = Query(50, ge=1, le=200),
+    user: dict = Depends(RoleChecker(["user", "admin"]))
+):
+    """List recent calls with high-level metadata."""
+    query: Dict[str, Any] = {}
+    if user["role"] != "admin":
+        query["user_id"] = user["user_id"]
+
+    calls_collection = get_collection(COLLECTION_CALLS)
+    cursor = calls_collection.find(query).sort("created_at", -1).limit(limit)
+    docs = await cursor.to_list(length=limit)
+    items = [_build_call_list_item(doc) for doc in docs]
+    # Strip user_id before returning
+    for item in items:
+        item.pop("user_id", None)
+    return {"calls": items}
+
+
+@router.get("/calls/{call_id}")
+async def call_detail(
+    call_id: str,
+    user: dict = Depends(RoleChecker(["user", "admin"]))
+):
+    """Return full call record including conversation and metrics."""
+    calls_collection = get_collection(COLLECTION_CALLS)
+    call = await calls_collection.find_one({"call_id": call_id})
+    if not call:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+
+    if user["role"] != "admin" and call.get("user_id") != user["user_id"]:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+
+    metadata = _build_call_list_item(call)
+    call.update(
+        {
+            "message_count": metadata["message_count"],
+            "evaluation": metadata["evaluation"],
+            "started_at": metadata["started_at"],
+            "updated_at": metadata["updated_at"],
+            "duration_seconds": metadata["duration_seconds"],
+            "tokens_used": metadata["tokens_used"],
+            "total_cost": metadata["total_cost"],
+        }
+    )
+    call.pop("user_id", None)
+
+    return jsonable_encoder(call, custom_encoder={ObjectId: str})

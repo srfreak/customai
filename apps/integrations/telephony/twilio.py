@@ -8,7 +8,7 @@ import time
 import audioop
 import traceback
 
-from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from core.auth import RoleChecker
@@ -76,6 +76,13 @@ async def _load_sales_agent_for_call(call_sid: str) -> Optional[SalesAgent]:
             agent.objection_map = payload.get("objections", {}) or {}
         except Exception:
             pass
+        # Capture optional scripts for greeting/introduction
+        try:
+            scripts = payload.get("scripts") or {}
+            opening = scripts.get("greeting") or scripts.get("pitch")
+            agent._opening_greeting = opening  # type: ignore[attr-defined]
+        except Exception:
+            pass
     # Group memory by call SID
     agent.conversation_id = call_sid
     # Stash convenience attrs for WS loop
@@ -120,6 +127,17 @@ def _evaluate_fallbacks(policies: Optional[List[Dict[str, Any]]], context: Dict[
         elif trigger == "asr_timeout" and context.get("asr_timeout"):
             triggered.append(policy)
     return triggered
+
+
+def _build_greeting(agent: Optional[SalesAgent]) -> str:
+    """Pick a first-turn greeting using strategy scripts or persona."""
+    if agent is None:
+        return "Hello! This is Scriza AI. Please provide a strategy for this use case."
+    opening = getattr(agent, "_opening_greeting", None)
+    if isinstance(opening, str) and opening.strip():
+        return opening.strip()
+    fallback_name = getattr(agent, "name", None) or "Scriza agent"
+    return f"Hi there! I'm {fallback_name} from Scriza. Can I assist you with your products and services?"
 
 
 async def _stream_silence(websocket: WebSocket, stream_sid: str, duration: float = 1.0) -> None:
@@ -225,11 +243,32 @@ class TwilioService:
             else:
                 raise TelephonyException("No webhook base configured for Twilio voice callback")
 
+            # Compute status callback URL so Twilio posts lifecycle updates even if WS never starts
+            status_callback = None
+            if settings.API_BASE_URL:
+                status_callback = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/status"
+            elif settings.TWILIO_CALL_WEBHOOK_URL:
+                base = settings.TWILIO_CALL_WEBHOOK_URL.rstrip('/')
+                if base.endswith('/voice'):
+                    base = base[:-6]  # drop '/voice'
+                status_callback = f"{base}/status"
+            elif settings.TWILIO_PUBLIC_BASE_URL:
+                status_callback = f"{settings.TWILIO_PUBLIC_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/status"
+
             call = self.client.calls.create(
                 to=to_number,
                 from_=from_number,
                 url=webhook,
                 method="POST",
+                **(
+                    {
+                        "status_callback": status_callback,
+                        "status_callback_event": ["initiated", "ringing", "answered", "completed"],
+                        "status_callback_method": "POST",
+                    }
+                    if status_callback
+                    else {}
+                ),
             )
             
             return {
@@ -394,6 +433,85 @@ async def handle_voice_call():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to handle voice call: {str(e)}"
         )
+
+
+@router.post("/status", include_in_schema=False)
+async def status_callback(request: Request):
+    """Twilio status callback for call lifecycle events.
+
+    Receives application/x-www-form-urlencoded payload with keys like:
+    - CallSid
+    - CallStatus (queued|ringing|in-progress|completed|busy|no-answer|failed|canceled)
+    - CallDuration (on completed)
+    """
+    try:
+        # Optional Twilio signature validation
+        signature = request.headers.get("X-Twilio-Signature")
+        if settings.TWILIO_AUTH_TOKEN and signature:
+            validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+            # Use the externally reachable URL when configured, otherwise fallback to the request URL
+            external_url = (
+                f"{settings.API_BASE_URL.rstrip('/')}/api/v1/integrations/telephony/twilio/status"
+                if settings.API_BASE_URL
+                else str(request.url)
+            )
+            form_for_sig = await request.form()
+            # Convert starlette FormData to a plain dict
+            form_dict = dict(form_for_sig)
+            if not validator.validate(external_url, form_dict, signature):
+                raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+            # keep using parsed form below
+            form = form_for_sig
+        else:
+            form = await request.form()
+        call_sid = (form.get("CallSid") or "").strip()
+        if not call_sid:
+            raise HTTPException(status_code=400, detail="Missing CallSid")
+        call_status = (form.get("CallStatus") or "").strip().lower()
+        call_duration = (form.get("CallDuration") or "").strip()
+        answered_by = (form.get("AnsweredBy") or "").strip()
+        sip_code = (form.get("SipResponseCode") or "").strip()
+
+        updates: Dict[str, Any] = {"status": call_status, "updated_at": datetime.utcnow()}
+        if call_duration:
+            try:
+                updates["duration_seconds"] = float(call_duration)
+            except ValueError:
+                pass
+        if call_status in {"busy", "no-answer", "failed", "canceled"}:
+            updates["lead_status"] = call_status.replace("-", "_")
+        if answered_by:
+            updates.setdefault("debug", {})
+            try:
+                updates["debug"].update({"answered_by": answered_by})
+            except Exception:
+                updates["debug"] = {"answered_by": answered_by}
+        if sip_code:
+            updates.setdefault("debug", {})
+            try:
+                updates["debug"].update({"sip_code": sip_code})
+            except Exception:
+                updates["debug"] = {"sip_code": sip_code}
+
+        res = await get_collection(COLLECTION_CALLS).update_one(
+            {"call_id": call_sid},
+            {"$set": updates},
+            upsert=True,
+        )
+        await live_calls.update_call(call_sid, updates)
+        logger.info(
+            "[twilio.status] %s -> %s (matched=%s modified=%s)",
+            call_sid,
+            call_status,
+            getattr(res, "matched_count", "?"),
+            getattr(res, "modified_count", "?"),
+        )
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Status callback processing failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Status processing error")
 
 
 def _mp3_to_mulaw_chunks(mp3_b64: str, chunk_ms: int = 20) -> List[str]:
@@ -856,6 +974,27 @@ async def media_stream_endpoint(websocket: WebSocket):
                 logger.info("Twilio stream started: %s", stream_sid)
                 print(f"[ws] start | streamSid={stream_sid} callSid={call_sid}")
                 call_start_time = time.monotonic()
+                # Ensure a minimal call record exists so subsequent updates don't fail
+                try:
+                    if call_sid:
+                        now = datetime.utcnow()
+                        await get_collection(COLLECTION_CALLS).update_one(
+                            {"call_id": call_sid},
+                            {
+                                "$setOnInsert": {
+                                    "call_id": call_sid,
+                                    "status": "in_progress",
+                                    "conversation": [],
+                                    "tokens_used": 0,
+                                    "duration_seconds": 0.0,
+                                    "created_at": now,
+                                    "updated_at": now,
+                                }
+                            },
+                            upsert=True,
+                        )
+                except Exception:
+                    logger.info("Non-fatal: failed to ensure minimal call record at WS start", exc_info=True)
                 # Load sales agent context for this call
                 try:
                     sales_agent = await _load_sales_agent_for_call(call_sid)
@@ -898,7 +1037,8 @@ async def media_stream_endpoint(websocket: WebSocket):
                         },
                     )
                 if settings.CALL_FIRST_TURN_GREETING:
-                    greeting_text = "Hello! This is Scriza AI. Thanks for taking the call."  # TODO personalise
+                    # Build a persona/strategy-aware greeting if available
+                    greeting_text = _build_greeting(sales_agent)
                     greet_in_progress = True
                     if verbose:
                         logger.info("Greeting caller with first-turn prompt (%d chars)", len(greeting_text))

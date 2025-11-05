@@ -19,6 +19,7 @@ from apps.admin_panel.user_management import router as admin_user_router
 from apps.memory.memory_manager import router as memory_router
 from apps.integrations.telephony.twilio import router as twilio_router
 from apps.ops import router as ops_router
+from apps.usage.router import router as usage_router
 from apps.templates.presets import router as presets_router
 
 app = FastAPI(
@@ -103,6 +104,12 @@ app.include_router(
 app.include_router(
     ops_router,
     tags=["ops"],
+)
+
+app.include_router(
+    usage_router,
+    prefix="/api/v1",
+    tags=["usage"],
 )
 
 app.include_router(

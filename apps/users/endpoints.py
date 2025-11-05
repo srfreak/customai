@@ -13,7 +13,10 @@ from passlib.context import CryptContext
 router = APIRouter()
 
 
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["argon2", "bcrypt", "bcrypt_sha256", "pbkdf2_sha256"],
+    deprecated="auto"
+)
 
 class Token(BaseModel):
     access_token: str

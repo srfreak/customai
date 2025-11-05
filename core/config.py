@@ -58,6 +58,14 @@ class Settings:
     ASR_OPENAI_MODEL: str = os.getenv("ASR_OPENAI_MODEL", "whisper-large-v3")
     ASR_OPENAI_TIMEOUT_MS: int = int(os.getenv("ASR_OPENAI_TIMEOUT_MS", "15000"))
     
+    # Usage / billing settings
+    DEFAULT_USAGE_CURRENCY: str = os.getenv("DEFAULT_USAGE_CURRENCY", "USD").upper()
+    EXCHANGE_RATE_USD_TO_INR: float = float(os.getenv("EXCHANGE_RATE_USD_TO_INR", "83.0"))
+    USAGE_ALERT_THRESHOLD_PERCENT: int = int(os.getenv("USAGE_ALERT_THRESHOLD_PERCENT", "80"))
+    USAGE_ALERT_EMAILS: List[str] = [
+        email.strip() for email in os.getenv("USAGE_ALERT_EMAILS", "").split(",") if email.strip()
+    ]
+
     # Twilio settings
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
     TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
